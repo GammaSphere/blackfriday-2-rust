@@ -1,0 +1,44 @@
+package blackfriday
+
+import (
+	"fmt"
+	"os"
+	"sort"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Dumps the `entities`
+// map -- which is unexported, hence the in-package test -- as sorted keys, so
+// the Rust port embeds what Go actually holds rather than a re-parse of the
+// source literal.
+//
+// The sort is byte-wise, matching Rust's Ord for str, so the binary search in
+// src/entities.rs is valid against this ordering.
+func TestZZGenEntities(t *testing.T) {
+	keys := make([]string, 0, len(entities))
+	withSemi, withoutSemi := 0, 0
+	for k, v := range entities {
+		if !v {
+			t.Fatalf("unexpected false value for %q", k)
+		}
+		keys = append(keys, k)
+		if k[len(k)-1] == ';' {
+			withSemi++
+		} else {
+			withoutSemi++
+		}
+	}
+	sort.Strings(keys)
+
+	f, err := os.Create("entities-dump.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "# total=%d with_semicolon=%d without_semicolon=%d\n",
+		len(keys), withSemi, withoutSemi)
+	for _, k := range keys {
+		fmt.Fprintln(f, k)
+	}
+	t.Logf("total=%d with=%d without=%d", len(keys), withSemi, withoutSemi)
+}

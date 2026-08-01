@@ -1,0 +1,63 @@
+package blackfriday
+
+import (
+	"bytes"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator. escapeHTML/escapeAllHTML are unexported, so this has
+// to run in-package.
+func TestZZGenEsc(t *testing.T) {
+	f, err := os.Create("esc-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	cases := [][]byte{
+		// the pinned TestEsc table
+		[]byte("abc"), []byte("a&c"), []byte("<"), []byte("[]:<"), []byte("Hello <!--"),
+		// the BenchmarkEscapeHTML corpus
+		[]byte(""),
+		[]byte("AT&T has an ampersand in their name."),
+		[]byte("AT&amp;T is another way to write it."),
+		[]byte("This & that."),
+		[]byte("4 < 5."), []byte("6 > 5."),
+		[]byte("Here's a [link] [1] with an ampersand in the URL."),
+		[]byte("Here's a link with an ampersand in the link text: [AT&T] [2]."),
+		[]byte("Here's an inline [link](/script?foo=1&bar=2)."),
+		[]byte("Here's an inline [link](</script?foo=1&bar=2>)."),
+		[]byte("[1]: http://example.com/?foo=1&bar=2"),
+		[]byte("[2]: http://att.com/  \"AT&T\""),
+		// entity edge cases
+		[]byte("&amp;"), []byte("&amp"), []byte("&"), []byte("&;"), []byte("&&"),
+		[]byte("&&amp;"), []byte("&a&amp;"), []byte("&&&"), []byte("&amp;tail"),
+		[]byte("x&amp;"), []byte("a&amp;b&amp;c"), []byte("&amp;&lt;&gt;"),
+		[]byte("&notarealentity;"), []byte("&#38;"), []byte("&#x26;"),
+		[]byte("&AMP;"), []byte("&Gt;"), []byte("&gT;"), []byte("&nbsp;x"),
+		[]byte("&CounterClockwiseContourIntegral;"),
+		// metacharacters
+		[]byte("<>&\""), []byte("'"), []byte("a<b>c\"d"),
+		[]byte("<script>alert(1)</script>"),
+		// long entity-ish runs that never terminate
+		[]byte("&abcdefghijklmnopqrstuvwxyz"),
+		[]byte("&12345678901234567890;"),
+		// bytes that are not valid UTF-8
+		{0xff, 0xfe, '<'},
+		{'c', 'a', 'f', 0xe9, ' ', '&', ' ', 'b'},
+		{0x00, '&', 0x01},
+	}
+
+	for _, c := range cases {
+		var a, b bytes.Buffer
+		escapeHTML(&a, c)
+		escapeAllHTML(&b, c)
+		fmt.Fprintf(f, "E %s %s %s\n",
+			hex.EncodeToString(c),
+			hex.EncodeToString(a.Bytes()),
+			hex.EncodeToString(b.Bytes()))
+	}
+}

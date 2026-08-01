@@ -25,6 +25,7 @@
 //! | [`node`] | `node.go` — the syntax tree, as an arena rather than a pointer graph |
 //! | [`util`] | the byte-level helpers at the bottom of `markdown.go` |
 //! | [`block`] | `block.go` — block-level parsing |
+//! | [`esc`] | `esc.go` — HTML escaping, over the `entities.go` table |
 //!
 //! Further modules — the block and inline parsers, HTML renderer and
 //! smartypants — land as the port proceeds. See `DECISIONS.md` for the
@@ -35,6 +36,8 @@
 #![warn(clippy::all)]
 
 pub mod block;
+pub(crate) mod entities;
+pub mod esc;
 pub mod flags;
 pub mod node;
 pub(crate) mod unicode_tables;
