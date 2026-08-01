@@ -24,6 +24,7 @@
 //! | [`flags`] | the `Extensions` / `HTMLFlags` / `ListType` const blocks |
 //! | [`node`] | `node.go` — the syntax tree, as an arena rather than a pointer graph |
 //! | [`util`] | the byte-level helpers at the bottom of `markdown.go` |
+//! | [`block`] | `block.go` — block-level parsing |
 //!
 //! Further modules — the block and inline parsers, HTML renderer and
 //! smartypants — land as the port proceeds. See `DECISIONS.md` for the
@@ -33,8 +34,10 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod block;
 pub mod flags;
 pub mod node;
+pub(crate) mod unicode_tables;
 pub mod util;
 
 pub use flags::{
