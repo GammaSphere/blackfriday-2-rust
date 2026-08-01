@@ -22,7 +22,7 @@
 //!
 //! The arena only ever grows during a parse, so an id handed out early stays
 //! valid no matter how many nodes are added later. Nodes are never freed
-//! individually; [`Node::unlink`] detaches a node from the tree but leaves its
+//! individually; [`Arena::unlink`] detaches a node from the tree but leaves its
 //! storage in place, exactly as Go leaves an unlinked node for the GC.
 //!
 //! # Traversal has to tolerate mutation

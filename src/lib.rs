@@ -23,6 +23,7 @@
 //! |---|---|
 //! | [`flags`] | the `Extensions` / `HTMLFlags` / `ListType` const blocks |
 //! | [`node`] | `node.go` — the syntax tree, as an arena rather than a pointer graph |
+//! | [`util`] | the byte-level helpers at the bottom of `markdown.go` |
 //!
 //! Further modules — the block and inline parsers, HTML renderer and
 //! smartypants — land as the port proceeds. See `DECISIONS.md` for the
@@ -34,6 +35,7 @@
 
 pub mod flags;
 pub mod node;
+pub mod util;
 
 pub use flags::{
     CellAlignFlags, Extensions, HtmlFlags, ListType, TAB_SIZE_DEFAULT, TAB_SIZE_DOUBLE, VERSION,
