@@ -40,6 +40,7 @@ pub(crate) mod entities;
 pub mod esc;
 pub mod flags;
 pub(crate) mod html_entities;
+pub mod markdown;
 pub mod node;
 pub mod unescape;
 pub(crate) mod unicode_tables;
