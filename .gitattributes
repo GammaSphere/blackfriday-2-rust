@@ -1,0 +1,11 @@
+# Normalize source files to LF in the repository.
+* text=auto eol=lf
+
+# The original blackfriday golden files are byte-for-byte fixtures. Any EOL
+# translation on checkout makes the upstream Go suite fail with phantom \r
+# diffs (expected "...\r\n" vs actual "...\n"), which looks like a port bug
+# but is purely a checkout artifact. Store and emit these verbatim.
+tests/original/testdata/** -text
+tests/original/**.go      -text
+
+*.png binary

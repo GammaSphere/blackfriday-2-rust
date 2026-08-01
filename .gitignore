@@ -1,0 +1,22 @@
+# The hackathon brief itself is not part of the submission.
+task.md
+
+# Rust
+/target/
+**/*.rs.bk
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+
+# Go adapter build output
+adapter/*.exe
+adapter/*.test
+
+# Native artifacts produced by the cdylib and consumed by the Go adapter
+adapter/lib/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

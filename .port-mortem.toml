@@ -1,0 +1,21 @@
+### Port Mortem 2026 — submission descriptor
+
+track = "E"                                   # Go -> Rust
+
+[source]
+name     = "blackfriday"
+url      = "https://github.com/russross/blackfriday"
+branch   = "v2"
+commit   = "4c9bf9512682b995722660a4196c0013228e2049"
+license  = "BSD-2-Clause"
+language = "go"
+
+[target]
+name     = "blackfriday-rs"
+language = "rust"
+
+[baseline]
+# Recorded in the next commit, once the upstream suite has been run and hashed
+# on a clean checkout. See tests/original/BASELINE.md.
+go_version   = "go1.23.5 windows/amd64"
+suite_status = "pending"
