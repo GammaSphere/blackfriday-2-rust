@@ -1,0 +1,260 @@
+=== RUN   TestPrefixHeaderNoExtensions
+=== PAUSE TestPrefixHeaderNoExtensions
+=== RUN   TestPrefixHeaderSpaceExtension
+=== PAUSE TestPrefixHeaderSpaceExtension
+=== RUN   TestPrefixHeaderIdExtension
+=== PAUSE TestPrefixHeaderIdExtension
+=== RUN   TestPrefixHeaderIdExtensionWithPrefixAndSuffix
+=== PAUSE TestPrefixHeaderIdExtensionWithPrefixAndSuffix
+=== RUN   TestPrefixAutoHeaderIdExtension
+=== PAUSE TestPrefixAutoHeaderIdExtension
+=== RUN   TestPrefixAutoHeaderIdExtensionWithPrefixAndSuffix
+=== PAUSE TestPrefixAutoHeaderIdExtensionWithPrefixAndSuffix
+=== RUN   TestPrefixHeaderLevelOffset
+=== PAUSE TestPrefixHeaderLevelOffset
+=== RUN   TestPrefixMultipleHeaderExtensions
+=== PAUSE TestPrefixMultipleHeaderExtensions
+=== RUN   TestUnderlineHeaders
+=== PAUSE TestUnderlineHeaders
+=== RUN   TestUnderlineHeadersAutoIDs
+=== PAUSE TestUnderlineHeadersAutoIDs
+=== RUN   TestHorizontalRule
+=== PAUSE TestHorizontalRule
+=== RUN   TestUnorderedList
+=== PAUSE TestUnorderedList
+=== RUN   TestOrderedList
+=== PAUSE TestOrderedList
+=== RUN   TestDefinitionList
+=== PAUSE TestDefinitionList
+=== RUN   TestConsecutiveLists
+=== PAUSE TestConsecutiveLists
+=== RUN   TestPreformattedHtml
+=== PAUSE TestPreformattedHtml
+=== RUN   TestPreformattedHtmlLax
+=== PAUSE TestPreformattedHtmlLax
+=== RUN   TestFencedCodeBlock
+=== PAUSE TestFencedCodeBlock
+=== RUN   TestFencedCodeInsideBlockquotes
+=== PAUSE TestFencedCodeInsideBlockquotes
+=== RUN   TestTable
+=== PAUSE TestTable
+=== RUN   TestUnorderedListWith_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== PAUSE TestUnorderedListWith_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== RUN   TestOrderedList_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== PAUSE TestOrderedList_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== RUN   TestFencedCodeBlock_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== PAUSE TestFencedCodeBlock_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== RUN   TestListWithFencedCodeBlock
+=== PAUSE TestListWithFencedCodeBlock
+=== RUN   TestListWithMalformedFencedCodeBlock
+=== PAUSE TestListWithMalformedFencedCodeBlock
+=== RUN   TestListWithFencedCodeBlockNoExtensions
+=== PAUSE TestListWithFencedCodeBlockNoExtensions
+=== RUN   TestTitleBlock_EXTENSION_TITLEBLOCK
+=== PAUSE TestTitleBlock_EXTENSION_TITLEBLOCK
+=== RUN   TestBlockComments
+=== PAUSE TestBlockComments
+=== RUN   TestTOC
+=== PAUSE TestTOC
+=== RUN   TestCompletePage
+=== PAUSE TestCompletePage
+=== RUN   TestIsFenceLine
+=== PAUSE TestIsFenceLine
+=== RUN   TestSanitizedAnchorName
+--- PASS: TestSanitizedAnchorName (0.00s)
+=== RUN   TestEsc
+=== PAUSE TestEsc
+=== RUN   TestEmphasis
+=== PAUSE TestEmphasis
+=== RUN   TestReferenceOverride
+=== PAUSE TestReferenceOverride
+=== RUN   TestStrong
+=== PAUSE TestStrong
+=== RUN   TestEmphasisMix
+=== PAUSE TestEmphasisMix
+=== RUN   TestEmphasisLink
+=== PAUSE TestEmphasisLink
+=== RUN   TestStrikeThrough
+=== PAUSE TestStrikeThrough
+=== RUN   TestCodeSpan
+=== PAUSE TestCodeSpan
+=== RUN   TestLineBreak
+=== PAUSE TestLineBreak
+=== RUN   TestInlineLink
+=== PAUSE TestInlineLink
+=== RUN   TestRelAttrLink
+=== PAUSE TestRelAttrLink
+=== RUN   TestHrefTargetBlank
+=== PAUSE TestHrefTargetBlank
+=== RUN   TestSafeInlineLink
+=== PAUSE TestSafeInlineLink
+=== RUN   TestReferenceLink
+=== PAUSE TestReferenceLink
+=== RUN   TestTags
+=== PAUSE TestTags
+=== RUN   TestAutoLink
+=== PAUSE TestAutoLink
+=== RUN   TestFootnotes
+=== PAUSE TestFootnotes
+=== RUN   TestFootnotesWithParameters
+=== PAUSE TestFootnotesWithParameters
+=== RUN   TestNestedFootnotes
+=== PAUSE TestNestedFootnotes
+=== RUN   TestInlineComments
+=== PAUSE TestInlineComments
+=== RUN   TestSmartDoubleQuotes
+=== PAUSE TestSmartDoubleQuotes
+=== RUN   TestSmartDoubleQuotesNBSP
+=== PAUSE TestSmartDoubleQuotesNBSP
+=== RUN   TestSmartAngledDoubleQuotes
+=== PAUSE TestSmartAngledDoubleQuotes
+=== RUN   TestSmartAngledDoubleQuotesNBSP
+=== PAUSE TestSmartAngledDoubleQuotesNBSP
+=== RUN   TestSmartFractions
+=== PAUSE TestSmartFractions
+=== RUN   TestDisableSmartDashes
+=== PAUSE TestDisableSmartDashes
+=== RUN   TestSkipLinks
+=== PAUSE TestSkipLinks
+=== RUN   TestSkipImages
+=== PAUSE TestSkipImages
+=== RUN   TestUseXHTML
+=== PAUSE TestUseXHTML
+=== RUN   TestSkipHTML
+=== PAUSE TestSkipHTML
+=== RUN   TestDocument
+=== PAUSE TestDocument
+=== RUN   TestReference
+=== PAUSE TestReference
+=== RUN   TestReference_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== PAUSE TestReference_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== CONT  TestPrefixHeaderNoExtensions
+=== CONT  TestEmphasis
+=== CONT  TestFootnotesWithParameters
+=== CONT  TestDisableSmartDashes
+=== CONT  TestPreformattedHtmlLax
+=== CONT  TestSkipHTML
+=== CONT  TestReference_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== CONT  TestPreformattedHtml
+=== CONT  TestFootnotes
+=== CONT  TestTitleBlock_EXTENSION_TITLEBLOCK
+=== CONT  TestDocument
+=== CONT  TestOrderedList_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== CONT  TestSmartFractions
+=== CONT  TestIsFenceLine
+=== CONT  TestCompletePage
+=== CONT  TestReference
+=== CONT  TestTOC
+=== CONT  TestBlockComments
+=== CONT  TestListWithFencedCodeBlockNoExtensions
+=== CONT  TestListWithMalformedFencedCodeBlock
+=== CONT  TestListWithFencedCodeBlock
+=== CONT  TestFencedCodeBlock_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== CONT  TestUnorderedListWith_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK
+=== CONT  TestTable
+=== CONT  TestSmartAngledDoubleQuotesNBSP
+=== CONT  TestSmartAngledDoubleQuotes
+=== CONT  TestSmartDoubleQuotesNBSP
+=== CONT  TestSmartDoubleQuotes
+=== CONT  TestInlineComments
+=== CONT  TestFencedCodeInsideBlockquotes
+=== CONT  TestNestedFootnotes
+=== CONT  TestEsc
+--- PASS: TestCompletePage (0.00s)
+=== CONT  TestFencedCodeBlock
+--- PASS: TestDocument (0.00s)
+=== CONT  TestInlineLink
+=== CONT  TestAutoLink
+--- PASS: TestIsFenceLine (0.00s)
+--- PASS: TestEsc (0.00s)
+=== CONT  TestTags
+--- PASS: TestDisableSmartDashes (0.05s)
+=== CONT  TestReferenceLink
+--- PASS: TestSmartAngledDoubleQuotes (0.06s)
+=== CONT  TestSafeInlineLink
+=== CONT  TestHrefTargetBlank
+--- PASS: TestTags (0.06s)
+--- PASS: TestListWithMalformedFencedCodeBlock (0.12s)
+=== CONT  TestRelAttrLink
+--- PASS: TestSmartDoubleQuotes (0.13s)
+=== CONT  TestSkipImages
+--- PASS: TestListWithFencedCodeBlock (0.14s)
+=== CONT  TestUseXHTML
+--- PASS: TestUseXHTML (0.00s)
+=== CONT  TestSkipLinks
+--- PASS: TestSkipImages (0.01s)
+=== CONT  TestUnderlineHeaders
+--- PASS: TestSmartAngledDoubleQuotesNBSP (0.14s)
+=== CONT  TestConsecutiveLists
+--- PASS: TestSmartDoubleQuotesNBSP (0.14s)
+=== CONT  TestHorizontalRule
+--- PASS: TestHorizontalRule (0.01s)
+=== CONT  TestUnderlineHeadersAutoIDs
+--- PASS: TestHrefTargetBlank (0.08s)
+=== CONT  TestUnorderedList
+--- PASS: TestSkipHTML (0.15s)
+=== CONT  TestDefinitionList
+--- PASS: TestListWithFencedCodeBlockNoExtensions (0.16s)
+=== CONT  TestEmphasisLink
+--- PASS: TestTitleBlock_EXTENSION_TITLEBLOCK (0.16s)
+=== CONT  TestLineBreak
+--- PASS: TestSkipLinks (0.03s)
+=== CONT  TestCodeSpan
+--- PASS: TestNestedFootnotes (0.16s)
+=== CONT  TestOrderedList
+--- PASS: TestInlineComments (0.17s)
+=== CONT  TestPrefixAutoHeaderIdExtension
+--- PASS: TestSafeInlineLink (0.13s)
+=== CONT  TestPrefixMultipleHeaderExtensions
+--- PASS: TestPrefixHeaderNoExtensions (0.20s)
+=== CONT  TestPrefixHeaderLevelOffset
+--- PASS: TestBlockComments (0.22s)
+=== CONT  TestPrefixAutoHeaderIdExtensionWithPrefixAndSuffix
+--- PASS: TestPrefixMultipleHeaderExtensions (0.04s)
+=== CONT  TestPrefixHeaderIdExtension
+--- PASS: TestRelAttrLink (0.11s)
+=== CONT  TestPrefixHeaderIdExtensionWithPrefixAndSuffix
+--- PASS: TestPrefixHeaderLevelOffset (0.05s)
+=== CONT  TestStrikeThrough
+--- PASS: TestEmphasis (0.26s)
+=== CONT  TestStrong
+--- PASS: TestLineBreak (0.13s)
+=== CONT  TestEmphasisMix
+--- PASS: TestSmartFractions (0.29s)
+=== CONT  TestReferenceOverride
+--- PASS: TestEmphasisLink (0.15s)
+=== CONT  TestPrefixHeaderSpaceExtension
+--- PASS: TestTOC (0.32s)
+--- PASS: TestUnderlineHeaders (0.19s)
+--- PASS: TestPreformattedHtmlLax (0.34s)
+--- PASS: TestTable (0.33s)
+--- PASS: TestPrefixAutoHeaderIdExtension (0.18s)
+--- PASS: TestUnderlineHeadersAutoIDs (0.20s)
+--- PASS: TestPrefixAutoHeaderIdExtensionWithPrefixAndSuffix (0.14s)
+--- PASS: TestStrikeThrough (0.11s)
+--- PASS: TestEmphasisMix (0.08s)
+--- PASS: TestCodeSpan (0.21s)
+--- PASS: TestPrefixHeaderIdExtensionWithPrefixAndSuffix (0.17s)
+--- PASS: TestPrefixHeaderSpaceExtension (0.11s)
+--- PASS: TestPrefixHeaderIdExtension (0.20s)
+--- PASS: TestStrong (0.19s)
+--- PASS: TestPreformattedHtml (0.47s)
+--- PASS: TestConsecutiveLists (0.34s)
+--- PASS: TestFencedCodeBlock_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK (0.53s)
+--- PASS: TestReferenceOverride (0.25s)
+--- PASS: TestUnorderedListWith_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK (0.57s)
+--- PASS: TestOrderedList_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK (0.57s)
+--- PASS: TestOrderedList (0.43s)
+--- PASS: TestUnorderedList (0.44s)
+--- PASS: TestFencedCodeInsideBlockquotes (0.63s)
+--- PASS: TestDefinitionList (0.59s)
+--- PASS: TestReferenceLink (0.70s)
+--- PASS: TestInlineLink (1.35s)
+--- PASS: TestFencedCodeBlock (1.51s)
+--- PASS: TestFootnotes (1.54s)
+--- PASS: TestFootnotesWithParameters (1.55s)
+--- PASS: TestAutoLink (2.09s)
+--- PASS: TestReference (10.26s)
+--- PASS: TestReference_EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK (10.31s)
+PASS
+ok  	github.com/russross/blackfriday/v2	10.712s

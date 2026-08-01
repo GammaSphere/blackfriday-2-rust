@@ -15,7 +15,20 @@ name     = "blackfriday-rs"
 language = "rust"
 
 [baseline]
-# Recorded in the next commit, once the upstream suite has been run and hashed
-# on a clean checkout. See tests/original/BASELINE.md.
-go_version   = "go1.23.5 windows/amd64"
-suite_status = "pending"
+# Recorded against upstream itself, on a clean checkout, before any port code
+# existed. See tests/original/BASELINE.md and tests/baseline-go-test.log.
+go_version     = "go1.23.5 windows/amd64"
+command        = "go test -v -count=1 ./..."
+exit_code      = 0
+tests_total    = 65
+tests_passed   = 65
+tests_failed   = 0
+tests_skipped  = 0
+wall_seconds   = 10.712
+
+[kickoff_hash]
+# SHA-256 of tests/original/SHA256SUMS, which itself pins all 52 vendored
+# files. This value must not change; if it does, the original suite was
+# edited and that requires disclosure.
+files    = 52
+manifest = "dd277c901490fa6f0c57053b927784bb5b5257f9f3d1103fae777122591818a9"
