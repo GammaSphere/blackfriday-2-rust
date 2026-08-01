@@ -22,9 +22,10 @@
 //! | Module | Ported from |
 //! |---|---|
 //! | [`flags`] | the `Extensions` / `HTMLFlags` / `ListType` const blocks |
+//! | [`node`] | `node.go` — the syntax tree, as an arena rather than a pointer graph |
 //!
-//! Further modules — the arena AST, block and inline parsers, HTML renderer
-//! and smartypants — land as the port proceeds. See `DECISIONS.md` for the
+//! Further modules — the block and inline parsers, HTML renderer and
+//! smartypants — land as the port proceeds. See `DECISIONS.md` for the
 //! architectural differences from the Go original and why each was necessary.
 
 #![forbid(unsafe_code)]
@@ -32,7 +33,9 @@
 #![warn(clippy::all)]
 
 pub mod flags;
+pub mod node;
 
 pub use flags::{
     CellAlignFlags, Extensions, HtmlFlags, ListType, TAB_SIZE_DEFAULT, TAB_SIZE_DOUBLE, VERSION,
 };
+pub use node::{Arena, Node, NodeId, NodeType, WalkStatus, Walker};
