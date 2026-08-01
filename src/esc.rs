@@ -10,17 +10,17 @@
 //! the port appends to a buffer and the public entry point hands back the
 //! finished bytes.
 //!
-//! # `escLink` is not here yet
+//! # Two different entity tables are in play
 //!
-//! `escLink` runs its input through Go's `html.UnescapeString` before escaping
-//! it. That is the *full* HTML5 unescaper from Go's standard library — numeric
-//! character references, the longest-match rule for entities written without a
-//! trailing semicolon, and its own table separate from the one in
-//! `entities.go`. It lands in its own commit; `escape_html` and
-//! `escape_all_html` below have no such dependency and are what the pinned
-//! `esc_test.go` exercises.
+//! [`escape_html`] consults blackfriday's own table (the crate-private
+//! `entities` module) to decide whether an `&` already opens a valid entity.
+//! [`esc_link`] first runs its input through [`crate::unescape`], a port of
+//! Go's `html.UnescapeString`, which uses Go's *standard library* table
+//! instead. The two tables differ in keys, values and size; the comparison is
+//! in the `html_entities` module docs.
 
 use crate::entities;
+use crate::unescape::unescape_string;
 use crate::util::is_alnum;
 
 /// The four bytes upstream rewrites, and what it rewrites them to.
@@ -66,6 +66,32 @@ pub fn escape_html(out: &mut Vec<u8>, s: &[u8]) {
 /// ```
 pub fn escape_all_html(out: &mut Vec<u8>, s: &[u8]) {
     escape_entities(out, s, true);
+}
+
+/// Unescapes link text, then escapes it for HTML output.
+///
+/// Ported from `escLink` (`esc.go:67`). The round trip is what normalises a
+/// destination that already contains entities: `?a=1&amp;b=2` unescapes to
+/// `?a=1&b=2` and re-escapes to `?a=1&amp;b=2`, while a raw `?a=1&b=2` reaches
+/// the same result from the other direction.
+///
+/// The unescape half is Go's `html.UnescapeString`, so numeric references and
+/// semicolon-less entities are decoded here even though `escape_html` alone
+/// would not recognise them.
+///
+/// ```
+/// # use blackfriday::esc::esc_link;
+/// let mut out = Vec::new();
+/// esc_link(&mut out, b"http://example.com/?a=1&b=2");
+/// assert_eq!(out, b"http://example.com/?a=1&amp;b=2");
+///
+/// let mut out = Vec::new();
+/// esc_link(&mut out, b"?x=&#38;");
+/// assert_eq!(out, b"?x=&amp;");
+/// ```
+pub fn esc_link(out: &mut Vec<u8>, text: &[u8]) {
+    let unescaped = unescape_string(text);
+    escape_html(out, &unescaped);
 }
 
 /// The shared body of [`escape_html`] and [`escape_all_html`].

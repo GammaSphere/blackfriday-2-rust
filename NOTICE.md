@@ -18,3 +18,19 @@ The upstream license text is reproduced in `LICENSE-blackfriday.txt`.
 
 Port code under `src/`, `ffi/`, `tests/port/`, `fuzz/`, and `bench/` is
 original work written for this port.
+
+## Go standard library
+
+Blackfriday's `escLink` calls `html.UnescapeString`, so reproducing its
+behaviour required porting that function and the entity tables it reads.
+
+- `src/unescape.rs` is a structural port of `$GOROOT/src/html/escape.go`.
+- `src/html_entities.rs` is generated from the `entity` and `entity2` maps in
+  `$GOROOT/src/html/entity.go`.
+
+Both derive from the Go standard library, which is distributed under the
+BSD-3-Clause license, © The Go Authors. The generator that extracts them is in
+`tools/genhtmlent/`; no Go source is vendored into this repository.
+
+Note that this is a *port*, not a link: the shipped artifact contains no Go
+code and does not depend on a Go toolchain to build or run.
