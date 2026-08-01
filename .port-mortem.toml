@@ -7,6 +7,7 @@ name     = "blackfriday"
 url      = "https://github.com/russross/blackfriday"
 branch   = "v2"
 commit   = "4c9bf9512682b995722660a4196c0013228e2049"
+tag      = "v2.1.0"   # the pinned commit is exactly this release tag
 license  = "BSD-2-Clause"
 language = "go"
 

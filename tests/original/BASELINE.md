@@ -11,6 +11,7 @@ up later, the port changes, not these files.
 | Repository | <https://github.com/russross/blackfriday> |
 | Branch | `v2` |
 | Commit | `4c9bf9512682b995722660a4196c0013228e2049` |
+| Tag | **`v2.1.0`** — the pinned commit is exactly this release |
 | Commit date | 2020-10-26 23:47:54 -0400 |
 | License | BSD-2-Clause |
 | Files vendored | 6 `_test.go` + 46 `testdata/` fixtures = **52** |

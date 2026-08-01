@@ -1,0 +1,29 @@
+[package]
+name = "blackfriday"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A Rust port of blackfriday v2, the Go Markdown processor"
+repository = "https://github.com/GammaSphere/blackfriday-2-rust"
+license = "BSD-2-Clause"
+readme = "README.md"
+keywords = ["markdown", "html", "parser", "blackfriday"]
+categories = ["text-processing"]
+
+[dependencies]
+# Intentionally empty. The core library has no dependencies: everything
+# blackfriday does is byte manipulation, and pulling in a crate for bitflags or
+# regex would make the behavioural comparison against Go harder to reason about,
+# not easier. See DECISIONS.md.
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = true
+codegen-units = 1

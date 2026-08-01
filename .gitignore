@@ -15,6 +15,9 @@ adapter/*.test
 # Native artifacts produced by the cdylib and consumed by the Go adapter
 adapter/lib/
 
+# Agent harness scratch
+.claude/
+
 # Editors / OS
 .vscode/
 .idea/
