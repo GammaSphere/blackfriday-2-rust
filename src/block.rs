@@ -1414,6 +1414,557 @@ impl Markdown {
         self.add_block(NodeType::Paragraph, &data[beg..end]);
     }
 
+    /// Parses block-level constructs out of `data`, one at a time.
+    ///
+    /// Ported from `block` (`block.go:37`). This is the dispatcher every other
+    /// block parser recurses through, which is why it and the four parsers
+    /// below had to land together.
+    ///
+    /// Recursion is bounded by `max_nesting`; past that the call returns
+    /// immediately, silently discarding the input rather than erroring.
+    pub(crate) fn block(&mut self, data: &[u8]) {
+        use crate::flags::Extensions;
+
+        // Called recursively: enforce a maximum depth.
+        if self.nesting >= self.max_nesting {
+            return;
+        }
+        self.nesting += 1;
+
+        let mut data = data;
+        while !data.is_empty() {
+            // Prefixed heading.
+            if self.is_prefix_heading(data) {
+                let n = self.prefix_heading(data);
+                data = &data[n..];
+                continue;
+            }
+
+            // Block of preformatted HTML.
+            if data[0] == b'<' {
+                let i = self.html(data, true);
+                if i > 0 {
+                    data = &data[i..];
+                    continue;
+                }
+            }
+
+            // Title block.
+            if self.extensions.intersects(Extensions::TITLEBLOCK) && data[0] == b'%' {
+                let i = self.title_block(data, true);
+                if i > 0 {
+                    data = &data[i..];
+                    continue;
+                }
+            }
+
+            // Blank lines.
+            let i = is_empty(data);
+            if i > 0 {
+                data = &data[i..];
+                continue;
+            }
+
+            // Indented code block.
+            if code_prefix(data) > 0 {
+                let n = self.code(data);
+                data = &data[n..];
+                continue;
+            }
+
+            // Fenced code block.
+            if self.extensions.intersects(Extensions::FENCED_CODE) {
+                let i = self.fenced_code_block(data, true);
+                if i > 0 {
+                    data = &data[i..];
+                    continue;
+                }
+            }
+
+            // Horizontal rule.
+            if is_hrule(data) {
+                self.add_block(NodeType::HorizontalRule, b"");
+                let mut i = 0usize;
+                while i < data.len() && data[i] != b'\n' {
+                    i += 1;
+                }
+                data = &data[i..];
+                continue;
+            }
+
+            // Block quote.
+            if quote_prefix(data) > 0 {
+                let n = self.quote(data);
+                data = &data[n..];
+                continue;
+            }
+
+            // Table.
+            if self.extensions.intersects(Extensions::TABLES) {
+                let i = self.table(data);
+                if i > 0 {
+                    data = &data[i..];
+                    continue;
+                }
+            }
+
+            // Unordered list.
+            if uli_prefix(data) > 0 {
+                let n = self.list(data, crate::ListType::NONE);
+                data = &data[n..];
+                continue;
+            }
+
+            // Ordered list.
+            if oli_prefix(data) > 0 {
+                let n = self.list(data, crate::ListType::ORDERED);
+                data = &data[n..];
+                continue;
+            }
+
+            // Definition list.
+            if self.extensions.intersects(Extensions::DEFINITION_LISTS) && dli_prefix(data) > 0 {
+                let n = self.list(data, crate::ListType::DEFINITION);
+                data = &data[n..];
+                continue;
+            }
+
+            // Anything else is a paragraph. Note this also finds underlined
+            // headings.
+            let n = self.paragraph(data);
+            data = &data[n..];
+        }
+
+        self.nesting -= 1;
+    }
+
+    /// Parses a blockquote, recursing into its contents.
+    ///
+    /// Ported from `quote` (`block.go:970`). Fenced code inside a quote is
+    /// swallowed whole, so its contents cannot terminate the quote.
+    pub(crate) fn quote(&mut self, data: &[u8]) -> usize {
+        use crate::flags::Extensions;
+
+        let block = self.add_block(NodeType::BlockQuote, b"");
+        let mut raw: Vec<u8> = Vec::new();
+        let mut beg = 0usize;
+        let mut end = 0usize;
+
+        while beg < data.len() {
+            end = beg;
+            // Step over whole lines, collecting them. Check for fenced code and
+            // if one is found, take it in its entirety regardless of contents.
+            while end < data.len() && data[end] != b'\n' {
+                if self.extensions.intersects(Extensions::FENCED_CODE) {
+                    let i = self.fenced_code_block(&data[end..], false);
+                    if i > 0 {
+                        // -1 compensates for the extra end += 1 after the loop.
+                        end += i - 1;
+                        break;
+                    }
+                }
+                end += 1;
+            }
+            if end < data.len() && data[end] == b'\n' {
+                end += 1;
+            }
+            let pre = quote_prefix(&data[beg..]);
+            if pre > 0 {
+                beg += pre;
+            } else if terminate_blockquote(data, beg, end) {
+                break;
+            }
+            raw.extend_from_slice(&data[beg..end]);
+            beg = end;
+        }
+
+        self.block(&raw);
+        self.finalize(block);
+        end
+    }
+
+    /// Parses an ordered, unordered or definition list.
+    ///
+    /// Ported from `list` (`block.go:1127`). The list starts tight and is
+    /// loosened only if an item reports containing a block.
+    pub(crate) fn list(&mut self, data: &[u8], flags: crate::ListType) -> usize {
+        use crate::ListType;
+
+        let mut flags = flags | ListType::ITEM_BEGINNING_OF_LIST;
+        let block = self.add_block(NodeType::List, b"");
+        self.arena[block].list.list_flags = flags;
+        self.arena[block].list.tight = true;
+
+        let mut i = 0usize;
+        while i < data.len() {
+            let skip = self.list_item(&data[i..], &mut flags);
+            if flags.intersects(ListType::ITEM_CONTAINS_BLOCK) {
+                self.arena[block].list.tight = false;
+            }
+            i += skip;
+            if skip == 0 || flags.intersects(ListType::ITEM_END_OF_LIST) {
+                break;
+            }
+            flags = flags.without(ListType::ITEM_BEGINNING_OF_LIST);
+        }
+
+        let above = self.arena[block].parent();
+        finalize_list(&mut self.arena, block);
+        if let Some(a) = above {
+            self.tip = a;
+        }
+        i
+    }
+
+    /// Parses a single list item.
+    ///
+    /// Ported from `listItem` (`block.go:1207`). Assumes any sublist prefix has
+    /// already been removed. `flags` is read *and written*: the caller learns
+    /// through it whether the item contained a block or ended the list.
+    ///
+    /// # Panics
+    ///
+    /// On empty input, matching upstream's unguarded `data[0]`.
+    pub(crate) fn list_item(&mut self, data: &[u8], flags: &mut crate::ListType) -> usize {
+        use crate::flags::Extensions;
+        use crate::ListType;
+
+        // Track the indentation of the first line.
+        let mut item_indent = 0usize;
+        if data[0] == b'\t' {
+            item_indent += 4;
+        } else {
+            while item_indent < 3 && data[item_indent] == b' ' {
+                item_indent += 1;
+            }
+        }
+
+        let mut bullet_char = b'*';
+        let mut i = uli_prefix(data);
+        if i == 0 {
+            i = oli_prefix(data);
+        } else {
+            bullet_char = data[i - 2];
+        }
+        if i == 0 {
+            i = dli_prefix(data);
+            // Reset the definition-term flag.
+            if i > 0 {
+                *flags = flags.without(ListType::TERM);
+            }
+        }
+        if i == 0 {
+            // In a definition list, set the term flag and carry on.
+            if flags.intersects(ListType::DEFINITION) {
+                *flags |= ListType::TERM;
+            } else {
+                return 0;
+            }
+        }
+
+        // Skip leading whitespace on the first line.
+        while i < data.len() && data[i] == b' ' {
+            i += 1;
+        }
+
+        // Find the end of the line.
+        let mut line = i;
+        while i > 0 && i < data.len() && data[i - 1] != b'\n' {
+            i += 1;
+        }
+
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(&data[line..i]);
+        line = i;
+
+        let mut contains_blank_line = false;
+        let mut sublist = 0usize;
+        let mut code_block_marker: Vec<u8> = Vec::new();
+
+        'gatherlines: while line < data.len() {
+            i += 1;
+
+            while i < data.len() && data[i - 1] != b'\n' {
+                i += 1;
+            }
+
+            // An empty line is assumed to belong to this item.
+            if is_empty(&data[line..i]) > 0 {
+                contains_blank_line = true;
+                line = i;
+                continue;
+            }
+
+            // Work out the indentation.
+            let mut indent = 0usize;
+            let mut indent_index = 0usize;
+            if data[line] == b'\t' {
+                indent_index += 1;
+                indent += 4;
+            } else {
+                while indent < 4 && line + indent < i && data[line + indent] == b' ' {
+                    indent += 1;
+                    indent_index += 1;
+                }
+            }
+
+            let chunk = &data[line + indent_index..i];
+
+            if self.extensions.intersects(Extensions::FENCED_CODE) {
+                // Track whether we are inside a code block; if so, skip the
+                // normal list processing entirely.
+                let (_, marker) = is_fence_line(chunk, None, &code_block_marker);
+                if !marker.is_empty() {
+                    if code_block_marker.is_empty() {
+                        code_block_marker = marker.clone();
+                    } else {
+                        code_block_marker.clear();
+                    }
+                }
+                if !code_block_marker.is_empty() || !marker.is_empty() {
+                    raw.extend_from_slice(&data[line + indent_index..i]);
+                    line = i;
+                    continue 'gatherlines;
+                }
+            }
+
+            // Work out how this line fits in.
+            if (uli_prefix(chunk) > 0 && !is_hrule(chunk))
+                || oli_prefix(chunk) > 0
+                || dli_prefix(chunk) > 0
+            {
+                // To nest, it must be indented further; otherwise it is either
+                // a different kind of list or the next item in this one.
+                if indent <= item_indent {
+                    if list_type_changed(chunk, *flags) {
+                        *flags |= ListType::ITEM_END_OF_LIST;
+                    } else if contains_blank_line {
+                        *flags |= ListType::ITEM_CONTAINS_BLOCK;
+                    }
+                    break 'gatherlines;
+                }
+
+                if contains_blank_line {
+                    *flags |= ListType::ITEM_CONTAINS_BLOCK;
+                }
+
+                // First item of the nested list?
+                if sublist == 0 {
+                    sublist = raw.len();
+                }
+            } else if self.is_prefix_heading(chunk) {
+                // An unindented heading is not nested, and ends the list.
+                if contains_blank_line && indent < 4 {
+                    *flags |= ListType::ITEM_END_OF_LIST;
+                    break 'gatherlines;
+                }
+                *flags |= ListType::ITEM_CONTAINS_BLOCK;
+            } else if contains_blank_line && indent < 4 {
+                // After a blank line, content belongs to this item only if it
+                // is indented four spaces, whatever the item's own indent.
+                if flags.intersects(ListType::DEFINITION) && i + 1 < data.len() {
+                    // Is the next item still part of this list?
+                    let mut next = i;
+                    while next < data.len() && data[next] != b'\n' {
+                        next += 1;
+                    }
+                    while next + 1 < data.len() && data[next] == b'\n' {
+                        next += 1;
+                    }
+                    if i + 1 < data.len() && data[i] != b':' && data[next] != b':' {
+                        *flags |= ListType::ITEM_END_OF_LIST;
+                    }
+                } else {
+                    *flags |= ListType::ITEM_END_OF_LIST;
+                }
+                break 'gatherlines;
+            } else if contains_blank_line {
+                // A blank line means this should be parsed as a block.
+                raw.push(b'\n');
+                *flags |= ListType::ITEM_CONTAINS_BLOCK;
+            }
+
+            // Re-introduce a blank that preceded this line.
+            if contains_blank_line {
+                contains_blank_line = false;
+                raw.push(b'\n');
+            }
+
+            raw.extend_from_slice(&data[line + indent_index..i]);
+            line = i;
+        }
+
+        let block = self.add_block(NodeType::Item, b"");
+        self.arena[block].list.list_flags = *flags;
+        self.arena[block].list.tight = false;
+        self.arena[block].list.bullet_char = bullet_char;
+        // Only '.' is possible in Markdown; CommonMark also allows ')'.
+        self.arena[block].list.delimiter = b'.';
+
+        if flags.intersects(ListType::ITEM_CONTAINS_BLOCK) && !flags.intersects(ListType::TERM) {
+            // Intermediate render of a block item, except for a definition term.
+            if sublist > 0 {
+                let head = raw[..sublist].to_vec();
+                let tail = raw[sublist..].to_vec();
+                self.block(&head);
+                self.block(&tail);
+            } else {
+                self.block(&raw);
+            }
+        } else {
+            // Intermediate render of an inline item.
+            if sublist > 0 {
+                let child = self.add_child(NodeType::Paragraph);
+                self.arena[child].content = raw[..sublist].to_vec();
+                let tail = raw[sublist..].to_vec();
+                self.block(&tail);
+            } else {
+                let child = self.add_child(NodeType::Paragraph);
+                self.arena[child].content = raw;
+            }
+        }
+
+        line
+    }
+
+    /// Parses a paragraph, which is also where underlined headings are found.
+    ///
+    /// Ported from `paragraph` (`block.go:1453`). Returns how much input was
+    /// consumed; the paragraph itself is emitted by
+    /// [`Markdown::render_paragraph`].
+    pub(crate) fn paragraph(&mut self, data: &[u8]) -> usize {
+        use crate::flags::Extensions;
+
+        // prev: start of the previous line; line: start of the current line;
+        // i: the cursor, i.e. the end of the current line.
+        // `prev` is assigned from `line` at the top of every iteration before
+        // it is read, so it needs no initial value -- Go's `var prev int` zero
+        // is likewise never observed.
+        let mut prev;
+        let mut line = 0usize;
+        let mut i = 0usize;
+        let tab_size = if self.extensions.intersects(Extensions::TAB_SIZE_EIGHT) {
+            crate::TAB_SIZE_DOUBLE
+        } else {
+            crate::TAB_SIZE_DEFAULT
+        };
+
+        while i < data.len() {
+            prev = line;
+            let current = &data[i..];
+            line = i;
+
+            // A reference or footnote ends the paragraph before it, and we
+            // report having consumed through the end of that reference.
+            let ref_end = self.is_reference(current, tab_size);
+            if ref_end > 0 {
+                self.render_paragraph(&data[..i]);
+                return i + ref_end;
+            }
+
+            // A blank line ends the paragraph.
+            let n = is_empty(current);
+            if n > 0 {
+                // Unless a definition list item follows it.
+                if self.extensions.intersects(Extensions::DEFINITION_LISTS)
+                    && i + 1 < data.len()
+                    && data[i + 1] == b':'
+                {
+                    let rest = data[prev..].to_vec();
+                    return self.list(&rest, crate::ListType::DEFINITION);
+                }
+
+                self.render_paragraph(&data[..i]);
+                return i + n;
+            }
+
+            // An underline marks a heading, so the paragraph ended on the
+            // previous line.
+            if i > 0 {
+                let level = is_underlined_heading(current);
+                if level > 0 {
+                    self.render_paragraph(&data[..prev]);
+
+                    // Ignore leading and trailing whitespace.
+                    let mut eol = i - 1;
+                    while prev < eol && data[prev] == b' ' {
+                        prev += 1;
+                    }
+                    while eol > prev && data[eol - 1] == b' ' {
+                        eol -= 1;
+                    }
+
+                    let mut id = String::new();
+                    if self.extensions.intersects(Extensions::AUTO_HEADING_IDS) {
+                        id = sanitized_anchor_name_bytes(&data[prev..eol]);
+                    }
+
+                    let block = self.add_block(NodeType::Heading, &data[prev..eol]);
+                    self.arena[block].heading.level = level;
+                    self.arena[block].heading.heading_id = id;
+
+                    // Find the end of the underline.
+                    while i < data.len() && data[i] != b'\n' {
+                        i += 1;
+                    }
+                    return i;
+                }
+            }
+
+            // A block of HTML on the next line ends the paragraph.
+            if self.extensions.intersects(Extensions::LAX_HTML_BLOCKS)
+                && data[i] == b'<'
+                && self.html(current, false) > 0
+            {
+                self.render_paragraph(&data[..i]);
+                return i;
+            }
+
+            // A prefixed heading or horizontal rule ends the paragraph.
+            if self.is_prefix_heading(current) || is_hrule(current) {
+                self.render_paragraph(&data[..i]);
+                return i;
+            }
+
+            // A fenced code block ends the paragraph.
+            if self.extensions.intersects(Extensions::FENCED_CODE)
+                && self.fenced_code_block(current, false) > 0
+            {
+                self.render_paragraph(&data[..i]);
+                return i;
+            }
+
+            // A definition list item means the previous line was a term.
+            if self.extensions.intersects(Extensions::DEFINITION_LISTS) && dli_prefix(current) != 0
+            {
+                let rest = data[prev..].to_vec();
+                return self.list(&rest, crate::ListType::DEFINITION);
+            }
+
+            // With NoEmptyLineBeforeBlock, a list or quote ends it too.
+            if self
+                .extensions
+                .intersects(Extensions::NO_EMPTY_LINE_BEFORE_BLOCK)
+                && (uli_prefix(current) != 0
+                    || oli_prefix(current) != 0
+                    || quote_prefix(current) != 0
+                    || code_prefix(current) != 0)
+            {
+                self.render_paragraph(&data[..i]);
+                return i;
+            }
+
+            // Otherwise scan to the start of the next line.
+            match data[i..].iter().position(|&c| c == b'\n') {
+                Some(nl) => i += nl + 1,
+                None => i += data[i..].len(),
+            }
+        }
+
+        self.render_paragraph(&data[..i]);
+        i
+    }
+
     /// Whether `data` begins an ATX heading.
     ///
     /// Ported from `isPrefixHeading` (`block.go:207`). With
@@ -2790,6 +3341,116 @@ mod tests {
         // A comparable tag that is not excluded does match.
         let mut p = Markdown::new(Options::none());
         assert!(p.html(b"<div>x</div>\n\n", true) > 0);
+    }
+
+    /// Measured Go trees for the block dispatcher, run end to end.
+    const DISPATCH_FIXTURE: &str = include_str!("../tests/fixtures/go-dispatch.txt");
+
+    /// Mirrors the generator's `dispatchTree`.
+    fn dispatch_tree(p: &Markdown, node: NodeId, depth: usize) -> String {
+        let mut s = String::new();
+        for c in p.arena().children(node) {
+            s.push_str(&">".repeat(depth));
+            let n = &p.arena()[c];
+            let content: &[u8] = if n.content.is_empty() {
+                &n.literal
+            } else {
+                &n.content
+            };
+            s.push_str(&format!(
+                "{}({})",
+                n.node_type,
+                content
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ));
+            match n.node_type {
+                NodeType::Heading => s.push_str(&format!("[L{}]", n.heading.level)),
+                NodeType::List | NodeType::Item => s.push_str(&format!(
+                    "[F{},T{}]",
+                    n.list.list_flags.bits(),
+                    n.list.tight
+                )),
+                NodeType::CodeBlock => s.push_str(&format!(
+                    "[fenced={},info={}]",
+                    n.code_block.is_fenced,
+                    n.code_block
+                        .info
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                )),
+                _ => {}
+            }
+            s.push(';');
+            s.push_str(&dispatch_tree(p, c, depth + 1));
+        }
+        s
+    }
+
+    #[test]
+    fn block_dispatcher_matches_go_end_to_end() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+
+        let ext_of = |name: &str| match name {
+            "none" => Extensions::NONE,
+            "common" => Extensions::COMMON,
+            "all" => {
+                Extensions::COMMON
+                    | Extensions::FOOTNOTES
+                    | Extensions::TITLEBLOCK
+                    | Extensions::DEFINITION_LISTS
+                    | Extensions::LAX_HTML_BLOCKS
+                    | Extensions::NO_EMPTY_LINE_BEFORE_BLOCK
+                    | Extensions::AUTO_HEADING_IDS
+            }
+            other => panic!("unknown extension set {other}"),
+        };
+
+        let mut n = 0;
+        for line in DISPATCH_FIXTURE.lines() {
+            let f: Vec<&str> = line.split(' ').collect();
+            if f.first() != Some(&"D") {
+                continue;
+            }
+            let data = unhex(f[1]);
+            let ext = ext_of(f[2]);
+            let want = f[3];
+
+            let mut p = Markdown::new(Options::none().with_extensions(ext));
+            p.block(&data);
+            let doc = p.document();
+            let got = {
+                let t = dispatch_tree(&p, doc, 0);
+                if t.is_empty() {
+                    "-".to_string()
+                } else {
+                    t
+                }
+            };
+            assert_eq!(
+                got,
+                want,
+                "block({:?}) with {}",
+                String::from_utf8_lossy(&data),
+                f[2]
+            );
+            n += 1;
+        }
+        assert!(n >= 100, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn nesting_is_bounded() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+        // Deeply nested quotes would recurse without the max_nesting guard.
+        let deep = ">".repeat(200) + " x\n";
+        let mut p = Markdown::new(Options::none().with_extensions(Extensions::COMMON));
+        p.block(deep.as_bytes()); // must return rather than blow the stack
+        assert_eq!(p.nesting, 0, "nesting is unwound on the way out");
     }
 
     #[test]

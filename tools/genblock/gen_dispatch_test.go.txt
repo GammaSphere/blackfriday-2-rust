@@ -1,0 +1,115 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Runs the block
+// dispatcher end to end and dumps the resulting tree, which exercises every
+// block parser at once -- including quote, list, listItem and paragraph, which
+// are mutually recursive and cannot be tested in isolation.
+
+func dispatchTree(n *Node, depth int) string {
+	var b strings.Builder
+	for c := n.FirstChild; c != nil; c = c.Next {
+		b.WriteString(strings.Repeat(">", depth))
+		content := c.content
+		if len(content) == 0 {
+			content = c.Literal
+		}
+		b.WriteString(fmt.Sprintf("%s(%s)", c.Type, hex.EncodeToString(content)))
+		switch c.Type {
+		case Heading:
+			b.WriteString(fmt.Sprintf("[L%d]", c.Level))
+		case List, Item:
+			b.WriteString(fmt.Sprintf("[F%d,T%v]", int(c.ListFlags), c.Tight))
+		case CodeBlock:
+			b.WriteString(fmt.Sprintf("[fenced=%v,info=%s]", c.IsFenced, hex.EncodeToString(c.Info)))
+		}
+		b.WriteString(";")
+		b.WriteString(dispatchTree(c, depth+1))
+	}
+	return b.String()
+}
+
+func runBlock(d []byte, ext Extensions) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New(WithExtensions(ext))
+	p.block(d)
+	t := dispatchTree(p.doc, 0)
+	if t == "" {
+		t = "-"
+	}
+	return t
+}
+
+func TestZZGenDispatch(t *testing.T) {
+	f, err := os.Create("dispatch-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	docs := []string{
+		"",
+		"hello\n",
+		"hello\nworld\n",
+		"para one\n\npara two\n",
+		"# Heading\n",
+		"# H1\ntext\n",
+		"Setext\n======\n",
+		"Setext2\n-------\n",
+		"---\n",
+		"***\n\ntext\n",
+		"> quoted\n",
+		"> line one\n> line two\n",
+		"> outer\n> > inner\n",
+		"> quote\n\nafter\n",
+		"* a\n* b\n",
+		"* a\n\n* b\n",
+		"1. one\n2. two\n",
+		"* a\n  * nested\n",
+		"* a\n\n  block in item\n\n* b\n",
+		"    indented code\n",
+		"```\nfenced\n```\n",
+		"```go\ncode\n```\n\ntext\n",
+		"> ```\n> in quote\n> ```\n",
+		"* item\n\n  ```\n  code\n  ```\n",
+		"a | b\n--- | ---\n1 | 2\n",
+		"<div>\nhtml\n</div>\n\n",
+		"[ref]: http://example.com\n\nsee [ref]\n",
+		"text\n\n[ref]: http://x\n",
+		"# H\n\n* a\n* b\n\n> q\n\n```\nc\n```\n",
+		"  \n\n\n",
+		"\n\n\n",
+		"* \n",
+		"1. a\n\n   b\n\n2. c\n",
+		"term\n:   definition\n",
+		"% title\n% more\nbody\n",
+	}
+
+	extSets := []struct {
+		name string
+		e    Extensions
+	}{
+		{"none", NoExtensions},
+		{"common", CommonExtensions},
+		{"all", CommonExtensions | Footnotes | Titleblock | DefinitionLists |
+			LaxHTMLBlocks | NoEmptyLineBeforeBlock | AutoHeadingIDs},
+	}
+
+	for _, d := range docs {
+		for _, es := range extSets {
+			fmt.Fprintf(f, "D %s %s %s\n", hex.EncodeToString([]byte(d)),
+				es.name, runBlock([]byte(d), es.e))
+		}
+	}
+}
