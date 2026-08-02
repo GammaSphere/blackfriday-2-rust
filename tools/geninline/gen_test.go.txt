@@ -1,0 +1,192 @@
+package blackfriday
+
+import (
+	"bytes"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Measures inline.go's
+// pure helpers, including the two regexps that have to be hand-coded because
+// the port carries no dependencies.
+//
+// tagLength ends with `i += bytes.IndexByte(data[i:], '>')` guarded by
+// `if i < 0`, which cannot fire for i >= 1 -- so a missing '>' subtracts one
+// instead of failing. Whatever it does, it is measured here rather than
+// reasoned about.
+
+func TestZZGenInline(t *testing.T) {
+	f, err := os.Create("inline-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "# anchor=%s\n", anchorRe.String())
+	fmt.Fprintf(f, "# entity=%s\n", htmlEntityRe.String())
+
+	// unescapeText
+	unesc := []string{
+		"", "plain", `a\b`, `a\\b`, `\`, `\\`, `a\`, `\a`, `\\\\`,
+		`\[link\]`, `a\nb`, `100\%`, `\\\`, "a\\\nb", `\<tag>`,
+	}
+	for _, s := range unesc {
+		var b bytes.Buffer
+		unescapeText(&b, []byte(s))
+		fmt.Fprintf(f, "U %s %s\n", hex.EncodeToString([]byte(s)),
+			hex.EncodeToString(b.Bytes()))
+	}
+
+	// stripMailto
+	mailtos := []string{
+		"", "mailto:a@b.c", "mailto://a@b.c", "MAILTO:a@b.c", "http://x",
+		"mailto:", "mailto://", "mailt:x", "mailto",
+	}
+	for _, s := range mailtos {
+		fmt.Fprintf(f, "M %s %s\n", hex.EncodeToString([]byte(s)),
+			hex.EncodeToString(stripMailto([]byte(s))))
+	}
+
+	// hasPrefixCaseInsensitive, including bytes where s[i]+delta wraps
+	type pfx struct{ s, p string }
+	pfxs := []pfx{
+		{"http://x", "http://"}, {"HTTP://X", "http://"}, {"HtTp://x", "http://"},
+		{"ftp://x", "ftp://"}, {"mailto:a", "mailto:"}, {"file://x", "file://"},
+		{"htt", "http://"}, {"", "http://"}, {"xhttp://", "http://"},
+		{"\xff\xfe\xfd\xfc\xfb\xfa\xf9", "http://"},
+		{"\xd7\xd8\xd9\xda\xdb\xdc\xdd", "http://"},
+		{"https://x", "https://"}, {"HTTPS://X", "https://"},
+	}
+	for _, c := range pfxs {
+		fmt.Fprintf(f, "H %s %s %v\n", hex.EncodeToString([]byte(c.s)),
+			hex.EncodeToString([]byte(c.p)),
+			hasPrefixCaseInsensitive([]byte(c.s), []byte(c.p)))
+	}
+
+	// isEndOfLink over every byte
+	ends := []byte{}
+	for i := 0; i < 256; i++ {
+		if isEndOfLink(byte(i)) {
+			ends = append(ends, byte(i))
+		}
+	}
+	fmt.Fprintf(f, "E %s\n", hex.EncodeToString(ends))
+
+	// tagLength and isMailtoAutoLink
+	tags := []string{
+		"", "<", "<a", "<a>", "</a>", "<a >", "<b>", "<br/>", "<br />",
+		"<http://x.com>", "<https://x.com>", "<ftp://x>", "<mailto:a@b.c>",
+		"<a@b.c>", "<a.b@c.d>", "<a-b_c@d.e>", "<a@b@c>", "<@b.c>", "<a@>",
+		"<x:y>", "<xy:z>", "<xyz:abc>", "<a:b>", "<h:>", "<http:>",
+		"<http://x y>", "<http://x'y>", `<http://x"y>`, "<http://x\ny>",
+		"<http://x\\>y>", "<div class=x>", "<div class='x'>",
+		"<no closing", "<http://noclose", "<a@b.c", "<1a>", "<-a>", "<.a>",
+		"<a1>", "<a-1>", "<a.b>", "<a+b>", "<a+b:c>", "</>", "<//>",
+		"<A HREF=\"x\">", "<x\ty>", "<!-- comment -->", "<?php?>",
+		"<http://x.com/a(b)>", "<mailto://a@b.c>", "<tel:123>",
+	}
+	for _, s := range tags {
+		at, end := tagLength([]byte(s))
+		fmt.Fprintf(f, "T %s %d %d\n", hex.EncodeToString([]byte(s)), int(at), end)
+	}
+
+	mailAuto := []string{
+		"a@b.c>", "@>", "a@>", "a@b>", "a@b@c>", "abc", "a@b.c", ">",
+		"a-b_c.d@e.f>", "a b@c>", "a@b.c>x", "<a@b.c>", "a@@b>",
+	}
+	for _, s := range mailAuto {
+		fmt.Fprintf(f, "A %s %d\n", hex.EncodeToString([]byte(s)),
+			isMailtoAutoLink([]byte(s)))
+	}
+
+	// isSafeLink (defined in inline.go, also used by the renderer)
+	safe := []string{
+		"", "/", "//", "/a", "/1", "/-", "./", "./a", "../", "../a",
+		"http://x", "http://", "https://x", "ftp://x", "mailto://x",
+		"mailto:x", "HTTP://X", "HtTp://x", "javascript:x", "x", "#f",
+	}
+	for _, s := range safe {
+		fmt.Fprintf(f, "S %s %v\n", hex.EncodeToString([]byte(s)), isSafeLink([]byte(s)))
+	}
+
+	// helperFindEmphChar
+	type emphCase struct {
+		s string
+		c byte
+	}
+	emphs := []emphCase{
+		{"", '*'}, {"a*b", '*'}, {"ab", '*'}, {`a\*b`, '*'}, {"*", '*'},
+		{"a`x*y`z*", '*'}, {"a`x*y", '*'}, {"a[x*y](z)*", '*'},
+		{"a[x*y]z", '*'}, {"a[x]*", '*'}, {"a[x] (y*)", '*'},
+		{"a[x]\n\n*", '*'}, {"a[x](y*z)b*", '*'}, {"[a*b][c]", '*'},
+		{"_a_", '_'}, {"~~a~~", '~'}, {"a[b", '*'}, {"a`b", '*'},
+		{`\*a*`, '*'}, {"**", '*'}, {"a[]*", '*'}, {"[a](b", '*'},
+	}
+	for _, c := range emphs {
+		fmt.Fprintf(f, "F %s %d %d\n", hex.EncodeToString([]byte(c.s)), c.c,
+			helperFindEmphChar([]byte(c.s), c.c))
+	}
+
+	// htmlEntityRe, via every match's bounds -- linkEndsWithEntity depends on
+	// the *last* match ending exactly at the cut point.
+	entities := []string{
+		"", "&amp;", "&AMP;", "&a;", "&ab;", "&abc12;", "&abc123;",
+		"&#38;", "&#0;", "&#1234567;", "&#12345678;", "&#x1F;", "&#X1f;",
+		"&#xABCDEF;", "&#xABCDEF1;", "&#x;", "&#;", "&;", "&",
+		"a&amp;b&lt;c", "&amp", "amp;", "&&amp;", "&CounterClockwiseContourIntegral;",
+		"&aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;", "&frac34;", "&blk12;",
+		"x&amp;", "&amp;x", "&a1;", "&ab1;", "&ab12;", "&ab123;",
+	}
+	for _, s := range entities {
+		ranges := htmlEntityRe.FindAllIndex([]byte(s), -1)
+		enc := ""
+		for _, r := range ranges {
+			enc += fmt.Sprintf("%d:%d,", r[0], r[1])
+		}
+		if enc == "" {
+			enc = "-"
+		}
+		fmt.Fprintf(f, "N %s %s\n", hex.EncodeToString([]byte(s)), enc)
+
+		// and the predicate that consumes it
+		for cut := 0; cut <= len(s); cut++ {
+			fmt.Fprintf(f, "L %s %d %v\n", hex.EncodeToString([]byte(s)), cut,
+				linkEndsWithEntity([]byte(s), cut))
+		}
+	}
+
+	// anchorRe -- matched against a suffix, anchored at its start
+	anchors := []string{
+		"", "<a href=\"http://x.com\">http://x.com</a>",
+		"<a href=\"http://x.com\" title=\"t\">http://x.com</a>",
+		"<a href=\"http://x.com\" title=\"t\" >http://x.com</a>",
+		"<a href=\"http://x.com\"\n>http://x.com</a>",
+		"<a href=\"/rel\">/rel</a>",
+		"<a href=\"ftp://x\">ftp://x</a>",
+		"<a href=\"https://x\">https://x</a>",
+		"<a href=\"http://x\">http://x</a> trailing",
+		"prefix <a href=\"http://x\">http://x</a>",
+		"<a href=\"http://x\">y</a>",
+		"<a href=\"javascript:x\">javascript:x</a>",
+		"<a  href=\"http://x\">http://x</a>",
+		"<a\thref=\"http://x\">http://x</a>",
+		"<a href='http://x'>http://x</a>",
+		"<a href=\"http://x\" title=\"a<b\">http://x</a>",
+		"<a href=\"http://x\" title=\"\">http://x</a>",
+		"<a href=\"http://x\">http://x</b>",
+		"<a href=\"http://x.com/a(b)?c=d&e#f\">http://x.com/a(b)?c=d&e#f</a>",
+	}
+	for _, s := range anchors {
+		m := anchorRe.Find([]byte(s))
+		enc := "-"
+		if m != nil {
+			enc = hex.EncodeToString(m)
+		}
+		fmt.Fprintf(f, "R %s %s\n", hex.EncodeToString([]byte(s)), enc)
+	}
+
+	// escapeChars, as a set
+	fmt.Fprintf(f, "C %s\n", hex.EncodeToString(escapeChars))
+}

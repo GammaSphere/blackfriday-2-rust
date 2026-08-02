@@ -41,6 +41,7 @@ pub mod esc;
 pub mod flags;
 pub mod html;
 pub(crate) mod html_entities;
+pub mod inline;
 pub mod markdown;
 pub mod node;
 pub mod smartypants;
