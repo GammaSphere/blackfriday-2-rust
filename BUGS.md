@@ -87,3 +87,77 @@ the value still goes through `escapeHTML` downstream.
 `src/block.rs::unescape_string` reproduces the guard exactly, including the
 class that contains only `&`. `unescape_string_matches_go_including_the_backslash_bug`
 pins both behaviours.
+
+---
+
+## 2. `titleBlock` emits a stray empty heading and loses the title
+
+**Severity:** medium — visibly wrong output through the public API.
+**Status:** confirmed, minimal reproducer.
+**Location:** `block.go:294`.
+
+### The defect
+
+```go
+splitData := bytes.Split(data, []byte("\n"))
+var i int
+for idx, b := range splitData {
+	if !bytes.HasPrefix(b, []byte("%")) {
+		i = idx // - 1
+		break
+	}
+}
+data = bytes.Join(splitData[0:i], []byte("\n"))
+consumed := len(data)
+...
+block := p.addBlock(Heading, data)   // unconditional
+```
+
+`i` is only ever assigned inside the loop, so if **every** line starts with `%`
+the loop never breaks and `i` stays `0`. `splitData[0:0]` is empty, the joined
+data is `""`, and `consumed` is `0`.
+
+Splitting a string that ends in `\n` always yields a trailing `""` element,
+which does not start with `%` — so the loop normally does break. The bad case is
+input whose final line has **no trailing newline**, which is exactly what a
+document consisting only of a title block looks like.
+
+Two further problems compound it. `addBlock` is called unconditionally, so a
+node is appended even on the zero-consumption path; and the `doRender` parameter
+is never read at all, so the "don't render, just measure" contract that
+`fencedCodeBlock` and `htmlHr` honour is silently violated here.
+
+### Reproducer (public API)
+
+```go
+blackfriday.Run([]byte("% a"), blackfriday.WithExtensions(blackfriday.Titleblock|blackfriday.CommonExtensions))
+```
+
+```html
+<h1 class="title"></h1>
+
+<p>% a</p>
+```
+
+Expected `<h1 class="title">a</h1>` and nothing else. Instead the title is lost,
+an empty heading is emitted, and the raw text is re-rendered as a paragraph —
+because `titleBlock` returned `0`, so `block()` ignored it and fell through to
+the paragraph handler, by which time the stray node had already been appended.
+
+Measured directly: `titleBlock("% a", …)` returns `0` while leaving one
+`Heading` node with empty content, `Level` 1 and `IsTitleblock` true. Identical
+with `doRender` false.
+
+`% a\n` (with the newline) behaves correctly: consumed 3, literal `a`.
+
+### Impact
+
+Requires the non-default `Titleblock` extension and input whose last line lacks
+a trailing newline. No crash; the damage is a wrong document — a stray empty
+`<h1 class="title">` plus duplicated body text.
+
+### In this port
+
+`src/block.rs::title_block` reproduces all of it: the `i = 0` fallback, the
+unconditional `add_block`, and the ignored `do_render`. Pinned by
+`title_block_reproduces_the_zero_consumption_bug`.

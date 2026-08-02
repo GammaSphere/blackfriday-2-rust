@@ -636,6 +636,125 @@ pub(crate) fn finalize_list(arena: &mut Arena, block: NodeId) {
     }
 }
 
+/// Go's `bytes.Replace(s, old, new, -1)`.
+fn replace_all(s: &[u8], old: &[u8], new: &[u8]) -> Vec<u8> {
+    if old.is_empty() {
+        return s.to_vec();
+    }
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < s.len() {
+        if s[i..].starts_with(old) {
+            out.extend_from_slice(new);
+            i += old.len();
+        } else {
+            out.push(s[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Tags that open a preformatted HTML block.
+///
+/// Ported from the `blockTags` map (`markdown.go`). Sorted for binary search.
+static BLOCK_TAGS: [&str; 38] = [
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "canvas",
+    "del",
+    "div",
+    "dl",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hgroup",
+    "iframe",
+    "ins",
+    "main",
+    "math",
+    "nav",
+    "noscript",
+    "ol",
+    "output",
+    "p",
+    "pre",
+    "progress",
+    "script",
+    "section",
+    "style",
+    "table",
+    "ul",
+    "video",
+];
+
+/// Moves a finished HTML block's staging content into its literal.
+///
+/// Ported from `finalizeHTMLBlock` (`block.go:416`).
+fn finalize_html_block(arena: &mut Arena, block: NodeId) {
+    arena[block].literal = std::mem::take(&mut arena[block].content);
+    arena[block].content = Vec::new();
+}
+
+/// Reads a block tag name from the start of `data`.
+///
+/// Ported from `htmlFindTag` (`block.go:475`). The lookup is case-sensitive, so
+/// `DIV` is not a block tag even though `div` is.
+pub(crate) fn html_find_tag(data: &[u8]) -> Option<&str> {
+    let mut i = 0usize;
+    while i < data.len() && crate::util::is_alnum(data[i]) {
+        i += 1;
+    }
+    let key = std::str::from_utf8(&data[..i]).ok()?;
+    BLOCK_TAGS.binary_search(&key).ok().map(|n| BLOCK_TAGS[n])
+}
+
+/// Finds where a preformatted HTML block ends.
+///
+/// Ported from `htmlFindEnd` (`block.go:487`). Assumes `data` starts with `</`.
+/// Without [`crate::Extensions::LAX_HTML_BLOCKS`] the closing tag must be
+/// followed by *two* blank lines' worth of emptiness, not one.
+pub(crate) fn html_find_end(tag: &str, data: &[u8], lax: bool) -> usize {
+    // `hr` is self-closing and handled elsewhere; upstream short-circuits it.
+    if tag == "hr" {
+        return 2;
+    }
+    let closetag = format!("</{tag}>");
+    if !data.starts_with(closetag.as_bytes()) {
+        return 0;
+    }
+    let mut i = closetag.len();
+
+    let skip = is_empty(&data[i..]);
+    if skip == 0 {
+        return 0;
+    }
+    i += skip;
+
+    if i >= data.len() {
+        return i;
+    }
+    if lax {
+        return i;
+    }
+    let skip = is_empty(&data[i..]);
+    if skip == 0 {
+        return 0;
+    }
+    i + skip
+}
+
 /// Length of a blockquote prefix, or `0`.
 ///
 /// Ported from `quotePrefix` (`block.go:943`). A single space after the `>` is
@@ -803,6 +922,98 @@ impl Markdown {
         finalize_code_block(&mut self.arena, block);
 
         i
+    }
+
+    /// Parses a pandoc-style title block.
+    ///
+    /// Ported from `titleBlock` (`block.go:294`). **Reproduces an upstream bug**;
+    /// see `BUGS.md` §2.
+    ///
+    /// Go only assigns the scan index inside the loop, so when *every* line
+    /// starts with `%` the loop never breaks and the index stays `0`. The joined
+    /// data is then empty and `consumed` is `0` — yet `addBlock` runs anyway, so
+    /// a stray empty `Heading` is appended and `block()` falls through to the
+    /// paragraph handler. `% a\n` is fine; `% a` without the newline is not.
+    ///
+    /// `do_render` is accepted and ignored, exactly as upstream does — unlike
+    /// [`Markdown::fenced_code_block`], this one always mutates the tree.
+    ///
+    /// # Panics
+    ///
+    /// On empty input, matching upstream's unguarded `data[0]`.
+    pub(crate) fn title_block(&mut self, data: &[u8], _do_render: bool) -> usize {
+        if data[0] != b'%' {
+            return 0;
+        }
+        let split: Vec<&[u8]> = data.split(|&c| c == b'\n').collect();
+
+        // Upstream: `var i int` then assignment only inside the loop. When no
+        // line fails the prefix test, i keeps its zero value. The commented-out
+        // `// - 1` in the original suggests the author was unsure here too.
+        let mut i = 0usize;
+        for (idx, b) in split.iter().enumerate() {
+            if !b.starts_with(b"%") {
+                i = idx;
+                break;
+            }
+        }
+
+        let joined = split[0..i].join(&b'\n');
+        let consumed = joined.len();
+
+        let mut content = joined;
+        if content.starts_with(b"% ") {
+            content.drain(..2);
+        }
+        content = replace_all(&content, b"\n% ", b"\n");
+
+        // Unconditional, even when consumed == 0. This is the bug.
+        let block = self.add_block(NodeType::Heading, &content);
+        self.arena[block].heading.level = 1;
+        self.arena[block].heading.is_titleblock = true;
+
+        consumed
+    }
+
+    /// Parses an `<hr>` block, the only self-closing block tag recognised.
+    ///
+    /// Ported from `htmlHr` (`block.go:442`). The tag must be followed by a
+    /// blank line; trailing newlines are trimmed from the stored literal.
+    pub(crate) fn html_hr(&mut self, data: &[u8], do_render: bool) -> usize {
+        if data.len() < 4 {
+            return 0;
+        }
+        if data[0] != b'<'
+            || (data[1] != b'h' && data[1] != b'H')
+            || (data[2] != b'r' && data[2] != b'R')
+        {
+            return 0;
+        }
+        if data[3] != b' ' && data[3] != b'/' && data[3] != b'>' {
+            // Not an <hr> tag after all; at least not a valid one.
+            return 0;
+        }
+        let mut i = 3usize;
+        while i < data.len() && data[i] != b'>' && data[i] != b'\n' {
+            i += 1;
+        }
+        if i < data.len() && data[i] == b'>' {
+            i += 1;
+            let j = is_empty(&data[i..]);
+            if j > 0 {
+                let size = i + j;
+                if do_render {
+                    let mut end = size;
+                    while end > 0 && data[end - 1] == b'\n' {
+                        end -= 1;
+                    }
+                    let block = self.add_block(NodeType::HTMLBlock, &data[..end]);
+                    finalize_html_block(&mut self.arena, block);
+                }
+                return size;
+            }
+        }
+        0
     }
 
     /// Whether `data` begins an ATX heading.
@@ -1636,6 +1847,190 @@ mod tests {
         // And that is what Go does too.
         let l = list_rows("L").next().unwrap();
         assert_eq!(l[1], "tight=true");
+    }
+
+    /// Measured Go answers for the title-block and HTML-block scanners.
+    const HTML_FIXTURE: &str = include_str!("../tests/fixtures/go-html.txt");
+
+    fn html_rows(tag: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+        HTML_FIXTURE.lines().filter_map(move |l| {
+            let f: Vec<String> = l.split(' ').map(str::to_string).collect();
+            (f.first().map(String::as_str) == Some(tag)).then_some(f)
+        })
+    }
+
+    #[test]
+    fn title_block_matches_go() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+        let mut n = 0;
+        for f in html_rows("T") {
+            let data = unhex(&f[1]);
+            if f[2] == "PANIC" {
+                let got = catch(std::panic::AssertUnwindSafe(|| {
+                    let mut p =
+                        Markdown::new(Options::none().with_extensions(Extensions::TITLEBLOCK));
+                    p.title_block(&data, true)
+                }));
+                assert!(got.is_none(), "must panic on {data:?}");
+                n += 1;
+                continue;
+            }
+            let mut p = Markdown::new(Options::none().with_extensions(Extensions::TITLEBLOCK));
+            let consumed = p.title_block(&data, true);
+            let ctx = format!("title_block({:?})", String::from_utf8_lossy(&data));
+            assert_eq!(consumed, f[2].parse::<usize>().unwrap(), "{ctx} consumed");
+
+            let kids = p.arena().children(p.document()).count();
+            assert_eq!(kids, f[3].parse::<usize>().unwrap(), "{ctx} node count");
+            if kids > 0 {
+                let c = p.arena()[p.document()].first_child().unwrap();
+                assert_eq!(p.arena()[c].content, unhex(&f[4]), "{ctx} content");
+                assert_eq!(
+                    p.arena()[c].heading.level,
+                    f[5].parse::<i32>().unwrap(),
+                    "{ctx} level"
+                );
+                assert_eq!(
+                    p.arena()[c].heading.is_titleblock,
+                    f[6] == "true",
+                    "{ctx} is_titleblock"
+                );
+            }
+            n += 1;
+        }
+        assert!(n >= 10, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn title_block_reproduces_the_zero_consumption_bug() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+        // See BUGS.md #2. Every line starts with '%' and there is no trailing
+        // newline, so Go's scan index never leaves zero: the joined data is
+        // empty, consumed is 0, and yet a node is appended anyway.
+        let mut p = Markdown::new(Options::none().with_extensions(Extensions::TITLEBLOCK));
+        assert_eq!(p.title_block(b"% a", true), 0, "consumes nothing");
+        let c = p.arena()[p.document()]
+            .first_child()
+            .expect("a stray node is still appended -- that is the bug");
+        assert_eq!(p.arena()[c].content, b"", "and its content is empty");
+        assert!(p.arena()[c].heading.is_titleblock);
+
+        // With the newline it behaves correctly.
+        let mut p = Markdown::new(Options::none().with_extensions(Extensions::TITLEBLOCK));
+        assert_eq!(p.title_block(b"% a\n", true), 3);
+        let c = p.arena()[p.document()].first_child().unwrap();
+        assert_eq!(p.arena()[c].content, b"a");
+    }
+
+    #[test]
+    fn title_block_ignores_do_render_entirely() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+        // Unlike fenced_code_block and html_hr, this one always mutates.
+        for render in [true, false] {
+            let mut p = Markdown::new(Options::none().with_extensions(Extensions::TITLEBLOCK));
+            p.title_block(b"% a\n", render);
+            assert!(
+                p.arena()[p.document()].first_child().is_some(),
+                "do_render={render} still appended a node"
+            );
+        }
+        // The fixture records identical results for both, which is why.
+        for f in html_rows("T") {
+            let pipe = f.iter().position(|s| s == "|").unwrap();
+            assert_eq!(f[2..pipe], f[pipe + 1..], "do_render changed nothing");
+        }
+    }
+
+    #[test]
+    fn html_hr_matches_go() {
+        use crate::markdown::Options;
+        let mut n = 0;
+        for f in html_rows("H") {
+            let data = unhex(&f[1]);
+            let mut p = Markdown::new(Options::none());
+            assert_eq!(
+                p.html_hr(&data, false),
+                f[2].parse::<usize>().unwrap(),
+                "html_hr({:?})",
+                String::from_utf8_lossy(&data)
+            );
+            n += 1;
+        }
+        assert!(n >= 10, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn html_find_tag_matches_go() {
+        let mut n = 0;
+        for f in html_rows("G") {
+            let data = unhex(&f[1]);
+            let want = if f[3] == "true" {
+                Some(String::from_utf8(unhex(&f[2])).unwrap())
+            } else {
+                None
+            };
+            assert_eq!(
+                html_find_tag(&data).map(str::to_string),
+                want,
+                "html_find_tag({:?})",
+                String::from_utf8_lossy(&data)
+            );
+            n += 1;
+        }
+        assert!(n >= 8, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn html_find_end_matches_go_in_both_lax_modes() {
+        let mut n = 0;
+        for f in html_rows("F") {
+            let tag = &f[1];
+            let data = unhex(&f[2]);
+            let ctx = format!(
+                "html_find_end({tag:?}, {:?})",
+                String::from_utf8_lossy(&data)
+            );
+            assert_eq!(
+                html_find_end(tag, &data, false),
+                f[3].parse::<usize>().unwrap(),
+                "{ctx} strict"
+            );
+            assert_eq!(
+                html_find_end(tag, &data, true),
+                f[4].parse::<usize>().unwrap(),
+                "{ctx} lax"
+            );
+            n += 1;
+        }
+        assert!(n >= 5, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn block_tags_table_is_sorted_and_case_sensitive() {
+        for w in BLOCK_TAGS.windows(2) {
+            assert!(w[0] < w[1], "{:?} then {:?}", w[0], w[1]);
+        }
+        assert_eq!(BLOCK_TAGS.len(), 38);
+        assert_eq!(html_find_tag(b"div>"), Some("div"));
+        assert_eq!(html_find_tag(b"DIV>"), None, "lookup is case-sensitive");
+        assert_eq!(html_find_tag(b"notatag>"), None);
+        assert_eq!(html_find_tag(b""), None);
+    }
+
+    #[test]
+    fn replace_all_matches_go_bytes_replace() {
+        assert_eq!(replace_all(b"a\n% b\n% c", b"\n% ", b"\n"), b"a\nb\nc");
+        assert_eq!(replace_all(b"aaa", b"a", b"bb"), b"bbbbbb");
+        assert_eq!(replace_all(b"abc", b"x", b"y"), b"abc");
+        assert_eq!(replace_all(b"", b"x", b"y"), b"");
+        assert_eq!(
+            replace_all(b"abc", b"", b"y"),
+            b"abc",
+            "empty old is a no-op"
+        );
     }
 
     #[test]

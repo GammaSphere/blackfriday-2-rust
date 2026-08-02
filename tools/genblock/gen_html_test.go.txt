@@ -1,0 +1,131 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Emits measured Go
+// answers for titleBlock, htmlHr, htmlComment, htmlFindTag and htmlFindEnd,
+// and probes whether titleBlock's zero-consumption path is reachable from Run.
+
+func safeTitle(d []byte, doRender bool) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New(WithExtensions(Titleblock))
+	n := p.titleBlock(d, doRender)
+	kids := 0
+	lit := []byte{}
+	level := 0
+	tb := false
+	for c := p.doc.FirstChild; c != nil; c = c.Next {
+		kids++
+		if kids == 1 {
+			lit = c.content
+			level = c.Level
+			tb = c.IsTitleblock
+		}
+	}
+	return fmt.Sprintf("%d %d %s %d %v", n, kids, hex.EncodeToString(lit), level, tb)
+}
+
+func safeHr(d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New()
+	return fmt.Sprintf("%d", p.htmlHr(d, false))
+}
+
+func safeComment(d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New()
+	return fmt.Sprintf("%d", p.htmlComment(d, false))
+}
+
+func TestZZGenHTML(t *testing.T) {
+	f, err := os.Create("html-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	p := New()
+	pLax := New(WithExtensions(LaxHTMLBlocks))
+
+	titles := [][]byte{
+		[]byte(""), []byte("%"), []byte("% a"), []byte("% a\n"),
+		[]byte("% a\n% b\n"), []byte("% a\n% b"), []byte("% a\nplain\n"),
+		[]byte("% a\n\n"), []byte("plain\n"), []byte("%%\n"),
+		[]byte("% a\n% b\n% c\nplain"), []byte("%\n%\n"),
+	}
+	for _, d := range titles {
+		fmt.Fprintf(f, "T %s %s | %s\n", hex.EncodeToString(d),
+			safeTitle(d, true), safeTitle(d, false))
+	}
+
+	hrs := [][]byte{
+		[]byte(""), []byte("<hr"), []byte("<hr>"), []byte("<hr>\n"),
+		[]byte("<hr>\n\n"), []byte("<HR>\n\n"), []byte("<hr />\n\n"),
+		[]byte("<hr class=x>\n\n"), []byte("<hrx>\n\n"), []byte("<h>\n\n"),
+		[]byte("<hr>x\n\n"), []byte("<hr\n>\n\n"), []byte("abc"),
+	}
+	for _, d := range hrs {
+		fmt.Fprintf(f, "H %s %s\n", hex.EncodeToString(d), safeHr(d))
+	}
+
+	comments := [][]byte{
+		[]byte(""), []byte("<!-- c -->"), []byte("<!-- c -->\n"),
+		[]byte("<!-- c -->\n\n"), []byte("<!-- c -->x\n\n"),
+		[]byte("<!--\nmulti\n-->\n\n"), []byte("<!-->\n\n"), []byte("not a comment\n\n"),
+	}
+	for _, d := range comments {
+		fmt.Fprintf(f, "C %s %s\n", hex.EncodeToString(d), safeComment(d))
+	}
+
+	tags := [][]byte{
+		[]byte("div>"), []byte("div"), []byte("p>"), []byte("span>"),
+		[]byte("blockquote>"), []byte("DIV>"), []byte(""), []byte(">"),
+		[]byte("notatag>"), []byte("h1>"), []byte("table>"),
+	}
+	for _, d := range tags {
+		tag, ok := p.htmlFindTag(d)
+		fmt.Fprintf(f, "G %s %s %v\n", hex.EncodeToString(d),
+			hex.EncodeToString([]byte(tag)), ok)
+	}
+
+	type fe struct {
+		tag  string
+		data []byte
+	}
+	for _, c := range []fe{
+		{"div", []byte("</div>\n\n")},
+		{"div", []byte("</div>\n")},
+		{"div", []byte("</div>")},
+		{"div", []byte("</div>\nx\n")},
+		{"div", []byte("</span>\n\n")},
+		{"hr", []byte("anything")},
+		{"p", []byte("</p>\n\n")},
+	} {
+		fmt.Fprintf(f, "F %s %s %d %d\n", c.tag, hex.EncodeToString(c.data),
+			p.htmlFindEnd(c.tag, c.data), pLax.htmlFindEnd(c.tag, c.data))
+	}
+
+	// Is titleBlock's zero-consumption path reachable through public Run?
+	for _, md := range []string{"% a", "% a\n% b", "%"} {
+		out := Run([]byte(md), WithExtensions(Titleblock|CommonExtensions))
+		fmt.Fprintf(f, "R %s %s\n", hex.EncodeToString([]byte(md)),
+			hex.EncodeToString(out))
+	}
+}
