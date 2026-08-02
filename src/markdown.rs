@@ -44,6 +44,105 @@
 use crate::flags::Extensions;
 use crate::node::{Arena, NodeId, NodeType, WalkStatus};
 
+/// Scans the link and optional title of a reference definition.
+///
+/// Ported from `scanLinkRef` (`markdown.go:649`). Returns the link and title
+/// spans plus the end of the definition; a `line_end` of `0` means no valid
+/// reference.
+///
+/// Go uses named return values that stay zero on the early `return`, so a
+/// rejected scan still hands back whatever offsets had been computed. Only
+/// `line_end` is consulted to decide validity, so that is preserved as-is.
+///
+/// # Panics
+///
+/// If the input ends immediately after an opening `<`, matching upstream:
+/// `link_offset` then equals the length and the following index panics in both
+/// languages.
+fn scan_link_ref(data: &[u8], mut i: usize) -> (usize, usize, usize, usize, usize) {
+    let mut title_offset = 0usize;
+    let mut title_end = 0usize;
+    let mut line_end = 0usize;
+
+    // Link: a whitespace-free run, optionally between angle brackets.
+    if data[i] == b'<' {
+        i += 1;
+    }
+    let mut link_offset = i;
+    while i < data.len()
+        && data[i] != b' '
+        && data[i] != b'\t'
+        && data[i] != b'\n'
+        && data[i] != b'\r'
+    {
+        i += 1;
+    }
+    let mut link_end = i;
+    // Go's && short-circuits before `data[linkEnd-1]`, which is what keeps a
+    // zero link_end from indexing out of range here too.
+    if data[link_offset] == b'<' && link_end > 0 && data[link_end - 1] == b'>' {
+        link_offset += 1;
+        link_end -= 1;
+    }
+
+    // Optional spacer: (space | tab)* (newline | ' | " | '(' )
+    while i < data.len() && (data[i] == b' ' || data[i] == b'\t') {
+        i += 1;
+    }
+    if i < data.len()
+        && data[i] != b'\n'
+        && data[i] != b'\r'
+        && data[i] != b'\''
+        && data[i] != b'"'
+        && data[i] != b'('
+    {
+        return (link_offset, link_end, title_offset, title_end, line_end);
+    }
+
+    // End of line.
+    if i >= data.len() || data[i] == b'\r' || data[i] == b'\n' {
+        line_end = i;
+    }
+    if i + 1 < data.len() && data[i] == b'\r' && data[i + 1] == b'\n' {
+        line_end += 1;
+    }
+
+    // Optional (space|tab)* after the newline.
+    if line_end > 0 {
+        i = line_end + 1;
+        while i < data.len() && (data[i] == b' ' || data[i] == b'\t') {
+            i += 1;
+        }
+    }
+
+    // Optional title: a non-newline run enclosed in ' " or ( alone on its line.
+    if i + 1 < data.len() && (data[i] == b'\'' || data[i] == b'"' || data[i] == b'(') {
+        i += 1;
+        title_offset = i;
+
+        while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
+            i += 1;
+        }
+        if i + 1 < data.len() && data[i] == b'\n' && data[i + 1] == b'\r' {
+            title_end = i + 1;
+        } else {
+            title_end = i;
+        }
+
+        // Step back over trailing whitespace.
+        i -= 1;
+        while i > title_offset && (data[i] == b' ' || data[i] == b'\t') {
+            i -= 1;
+        }
+        if i > title_offset && (data[i] == b'\'' || data[i] == b'"' || data[i] == b')') {
+            line_end = title_end;
+            title_end = i;
+        }
+    }
+
+    (link_offset, link_end, title_offset, title_end, line_end)
+}
+
 /// Maximum nesting depth for blocks and inline elements.
 ///
 /// Upstream sets this in `New` rather than as a constant; it is named here so
@@ -323,6 +422,191 @@ impl Markdown {
         node
     }
 
+    /// Scans a link-reference definition, registering it and returning its
+    /// length, or `0`.
+    ///
+    /// Ported from `isReference` (`markdown.go:546`). Ids are stored
+    /// lowercased, matching the case-insensitive lookup in [`Self::get_ref`].
+    ///
+    /// A footnote may have an empty id (`[^]:`), but an ordinary reference may
+    /// not (`[]:`) — that asymmetry is upstream's and is preserved.
+    pub(crate) fn is_reference(&mut self, data: &[u8], tab_size: usize) -> usize {
+        use crate::flags::Extensions;
+
+        // Up to three optional leading spaces.
+        if data.len() < 4 {
+            return 0;
+        }
+        let mut i = 0usize;
+        while i < 3 && data[i] == b' ' {
+            i += 1;
+        }
+
+        let mut note_id = 0i32;
+
+        // Id: anything but a newline, between brackets.
+        if data[i] != b'[' {
+            return 0;
+        }
+        i += 1;
+        if self.extensions.intersects(Extensions::FOOTNOTES) && i < data.len() && data[i] == b'^' {
+            // Any non-zero value will do; real note ids are assigned later.
+            note_id = 1;
+            i += 1;
+        }
+        let id_offset = i;
+        while i < data.len() && data[i] != b'\n' && data[i] != b'\r' && data[i] != b']' {
+            i += 1;
+        }
+        if i >= data.len() || data[i] != b']' {
+            return 0;
+        }
+        let id_end = i;
+        // Footnotes may be empty; plain references may not.
+        if note_id == 0 && id_offset == id_end {
+            return 0;
+        }
+
+        // Spacer: colon (space | tab)* newline? (space | tab)*
+        i += 1;
+        if i >= data.len() || data[i] != b':' {
+            return 0;
+        }
+        i += 1;
+        while i < data.len() && (data[i] == b' ' || data[i] == b'\t') {
+            i += 1;
+        }
+        if i < data.len() && (data[i] == b'\n' || data[i] == b'\r') {
+            i += 1;
+            if i < data.len() && data[i] == b'\n' && data[i - 1] == b'\r' {
+                i += 1;
+            }
+        }
+        while i < data.len() && (data[i] == b' ' || data[i] == b'\t') {
+            i += 1;
+        }
+        if i >= data.len() {
+            return 0;
+        }
+
+        let (link_offset, link_end, title_offset, title_end, line_end, raw, has_block);
+        if self.extensions.intersects(Extensions::FOOTNOTES) && note_id != 0 {
+            let (bs, be, contents, hb) = self.scan_footnote(data, i, tab_size);
+            link_offset = bs;
+            link_end = be;
+            raw = contents;
+            has_block = hb;
+            title_offset = 0;
+            title_end = 0;
+            line_end = link_end;
+        } else {
+            let (lo, le, to, te, ln) = scan_link_ref(data, i);
+            link_offset = lo;
+            link_end = le;
+            title_offset = to;
+            title_end = te;
+            line_end = ln;
+            raw = Vec::new();
+            has_block = false;
+        }
+        if line_end == 0 {
+            return 0;
+        }
+
+        let mut r = InternalReference {
+            note_id,
+            has_block,
+            ..Default::default()
+        };
+        if note_id > 0 {
+            // The link field is reused for the id, since footnotes have no
+            // link; and title holds the contained text rather than a title.
+            r.link = data[id_offset..id_end].to_vec();
+            r.title = raw;
+        } else {
+            r.link = data[link_offset..link_end].to_vec();
+            r.title = data[title_offset..title_end].to_vec();
+        }
+
+        // Id matches are case-insensitive.
+        let id = String::from_utf8_lossy(&data[id_offset..id_end]).to_lowercase();
+        self.refs.insert(id, r);
+
+        line_end
+    }
+
+    /// Extracts a footnote's body, shifting it left by one indent.
+    ///
+    /// Ported from `scanFootnote` (`markdown.go:723`). Returns the body's start
+    /// and end in the input, the de-indented contents, and whether it spanned
+    /// more than the first line.
+    pub(crate) fn scan_footnote(
+        &self,
+        data: &[u8],
+        mut i: usize,
+        indent_size: usize,
+    ) -> (usize, usize, Vec<u8>, bool) {
+        use crate::block::is_empty;
+        use crate::util::is_indented;
+
+        if i == 0 || data.is_empty() {
+            return (0, 0, Vec::new(), false);
+        }
+
+        while i < data.len() && data[i] == b' ' {
+            i += 1;
+        }
+
+        let block_start = i;
+
+        let mut block_end = i;
+        while i < data.len() && data[i - 1] != b'\n' {
+            i += 1;
+        }
+
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(&data[block_end..i]);
+        block_end = i;
+
+        let mut has_block = false;
+        let mut contains_blank_line = false;
+
+        while block_end < data.len() {
+            i += 1;
+            while i < data.len() && data[i - 1] != b'\n' {
+                i += 1;
+            }
+
+            // An empty line is assumed to belong to this item.
+            if is_empty(&data[block_end..i]) > 0 {
+                contains_blank_line = true;
+                block_end = i;
+                continue;
+            }
+
+            let n = is_indented(&data[block_end..i], indent_size);
+            if n == 0 {
+                // End of the block; this line is not included.
+                break;
+            }
+
+            if contains_blank_line {
+                raw.push(b'\n');
+                contains_blank_line = false;
+            }
+
+            raw.extend_from_slice(&data[block_end + n..i]);
+            has_block = true;
+            block_end = i;
+        }
+
+        if data[block_end - 1] != b'\n' {
+            raw.push(b'\n');
+        }
+
+        (block_start, block_end, raw, has_block)
+    }
+
     /// Closes every block between the last match and the old insertion point.
     pub(crate) fn close_unmatched_blocks(&mut self) {
         if !self.all_closed {
@@ -426,6 +710,150 @@ mod tests {
         assert!(!p.arena[para].open);
         assert!(p.arena[quote].open, "stops at the last matched container");
         assert!(p.all_closed);
+    }
+
+    /// Measured Go answers for the reference scanners.
+    const REF_FIXTURE: &str = include_str!("../tests/fixtures/go-ref.txt");
+
+    fn ref_rows(tag: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+        REF_FIXTURE.lines().filter_map(move |l| {
+            let f: Vec<String> = l.split(' ').map(str::to_string).collect();
+            (f.first().map(String::as_str) == Some(tag)).then_some(f)
+        })
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("bad hex"))
+            .collect()
+    }
+
+    /// Renders the parser's ref table the way the generator does, so the two
+    /// can be compared directly.
+    fn refs_repr(p: &Markdown) -> String {
+        let mut keys: Vec<&String> = p.refs.keys().collect();
+        keys.sort();
+        let mut out = String::new();
+        for k in keys {
+            let r = &p.refs[k];
+            out.push_str(&format!(
+                " {}/{}/{}/{}/{}",
+                hex(k.as_bytes()),
+                hex(&r.link),
+                hex(&r.title),
+                r.note_id,
+                r.has_block
+            ));
+        }
+        out
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    #[test]
+    fn is_reference_matches_go_with_and_without_footnotes() {
+        use crate::flags::Extensions;
+        let mut n = 0;
+        for f in ref_rows("R") {
+            let data = unhex(&f[1]);
+            let pipe = f.iter().position(|s| s == "|").unwrap();
+            let ctx = format!("is_reference({:?})", String::from_utf8_lossy(&data));
+
+            for (footnotes, span) in [(false, 2..pipe), (true, pipe + 1..f.len())] {
+                let ext = if footnotes {
+                    Extensions::FOOTNOTES
+                } else {
+                    Extensions::NONE
+                };
+                let mut p = Markdown::new(Options::none().with_extensions(ext));
+                let got = p.is_reference(&data, crate::TAB_SIZE_DEFAULT);
+                let want: Vec<String> = f[span].to_vec();
+                assert_eq!(
+                    got,
+                    want[0].parse::<usize>().unwrap(),
+                    "{ctx} size [footnotes={footnotes}]"
+                );
+                let want_refs = want[1..]
+                    .iter()
+                    .map(|s| format!(" {s}"))
+                    .collect::<String>();
+                assert_eq!(
+                    refs_repr(&p),
+                    want_refs,
+                    "{ctx} refs [footnotes={footnotes}]"
+                );
+            }
+            n += 1;
+        }
+        assert!(n >= 18, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn scan_link_ref_matches_go() {
+        let mut n = 0;
+        for f in ref_rows("L") {
+            let data = unhex(&f[1]);
+            let i: usize = f[2].parse().unwrap();
+            let got = super::scan_link_ref(&data, i);
+            let want = (
+                f[3].parse::<usize>().unwrap(),
+                f[4].parse::<usize>().unwrap(),
+                f[5].parse::<usize>().unwrap(),
+                f[6].parse::<usize>().unwrap(),
+                f[7].parse::<usize>().unwrap(),
+            );
+            assert_eq!(
+                got,
+                want,
+                "scan_link_ref({:?}, {i})",
+                String::from_utf8_lossy(&data)
+            );
+            n += 1;
+        }
+        assert!(n >= 5, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn scan_footnote_matches_go() {
+        use crate::flags::Extensions;
+        let mut n = 0;
+        for f in ref_rows("N") {
+            let data = unhex(&f[1]);
+            let i: usize = f[2].parse().unwrap();
+            let p = Markdown::new(Options::none().with_extensions(Extensions::FOOTNOTES));
+            let (bs, be, contents, hb) = p.scan_footnote(&data, i, crate::TAB_SIZE_DEFAULT);
+            let ctx = format!("scan_footnote({:?}, {i})", String::from_utf8_lossy(&data));
+            assert_eq!(bs, f[3].parse::<usize>().unwrap(), "{ctx} start");
+            assert_eq!(be, f[4].parse::<usize>().unwrap(), "{ctx} end");
+            assert_eq!(contents, unhex(&f[5]), "{ctx} contents");
+            assert_eq!(hb, f[6] == "true", "{ctx} has_block");
+            n += 1;
+        }
+        assert!(n >= 5, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn footnotes_may_have_an_empty_id_but_references_may_not() {
+        use crate::flags::Extensions;
+        // [^]: is legal, []: is not. The asymmetry is upstream's.
+        let mut p = Markdown::new(Options::none().with_extensions(Extensions::FOOTNOTES));
+        assert!(p.is_reference(b"[^]: note\n", 4) > 0);
+
+        let mut p = Markdown::new(Options::none());
+        assert_eq!(p.is_reference(b"[]: http://example.com\n", 4), 0);
+    }
+
+    #[test]
+    fn reference_ids_are_stored_lowercased() {
+        let mut p = Markdown::new(Options::none());
+        assert!(p.is_reference(b"[MixedCase]: http://x\n", 4) > 0);
+        assert!(p.refs.contains_key("mixedcase"));
+        assert!(!p.refs.contains_key("MixedCase"));
+        // ...which is what makes the case-insensitive lookup work.
+        assert!(p.get_ref("MIXEDCASE").is_some());
     }
 
     #[test]

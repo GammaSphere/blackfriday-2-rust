@@ -1,0 +1,129 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"sort"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Measured answers for
+// isReference, scanLinkRef and scanFootnote.
+
+func safeIsRef(d []byte, footnotes bool) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	var p *Markdown
+	if footnotes {
+		p = New(WithExtensions(Footnotes))
+	} else {
+		p = New()
+	}
+	n := isReference(p, d, TabSizeDefault)
+	keys := make([]string, 0, len(p.refs))
+	for k := range p.refs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := fmt.Sprintf("%d", n)
+	for _, k := range keys {
+		r := p.refs[k]
+		out += fmt.Sprintf(" %s/%s/%s/%d/%v",
+			hex.EncodeToString([]byte(k)),
+			hex.EncodeToString(r.link),
+			hex.EncodeToString(r.title),
+			r.noteID, r.hasBlock)
+	}
+	return out
+}
+
+func safeScanLinkRef(d []byte, i int) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New()
+	lo, le, to, te, ln := scanLinkRef(p, d, i)
+	return fmt.Sprintf("%d %d %d %d %d", lo, le, to, te, ln)
+}
+
+func safeScanFootnote(d []byte, i int) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New(WithExtensions(Footnotes))
+	bs, be, contents, hb := scanFootnote(p, d, i, TabSizeDefault)
+	return fmt.Sprintf("%d %d %s %v", bs, be, hex.EncodeToString(contents), hb)
+}
+
+func TestZZGenRef(t *testing.T) {
+	f, err := os.Create("ref-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	refs := [][]byte{
+		[]byte(""), []byte("[a]"), []byte("[a]:"), []byte("[a]: x\n"),
+		[]byte("[a]: http://example.com\n"),
+		[]byte("[a]: http://example.com \"Title\"\n"),
+		[]byte("[a]: http://example.com 'Title'\n"),
+		[]byte("[a]: http://example.com (Title)\n"),
+		[]byte("[a]: <http://example.com>\n"),
+		[]byte("[A]: http://example.com\n"),
+		[]byte("[]: http://example.com\n"),
+		[]byte("[^]: note\n"),
+		[]byte("[^fn]: note text\n"),
+		[]byte("[^fn]: note\n    indented\n"),
+		[]byte("   [a]: http://example.com\n"),
+		[]byte("    [a]: http://example.com\n"),
+		[]byte("[a]:\n  http://example.com\n"),
+		[]byte("[a]: http://example.com\n   \"Title\"\n"),
+		[]byte("[a b]: http://example.com\n"),
+		[]byte("not a ref\n"),
+		[]byte("[a]: http://example.com junk\n"),
+	}
+	for _, d := range refs {
+		fmt.Fprintf(f, "R %s %s | %s\n", hex.EncodeToString(d),
+			safeIsRef(d, false), safeIsRef(d, true))
+	}
+
+	links := []struct {
+		d []byte
+		i int
+	}{
+		{[]byte("http://x.com\n"), 0},
+		{[]byte("<http://x.com>\n"), 0},
+		{[]byte("http://x.com \"T\"\n"), 0},
+		{[]byte("http://x.com\n\"T\"\n"), 0},
+		{[]byte("http://x.com junk\n"), 0},
+		{[]byte("http://x.com"), 0},
+	}
+	for _, c := range links {
+		fmt.Fprintf(f, "L %s %d %s\n", hex.EncodeToString(c.d), c.i,
+			safeScanLinkRef(c.d, c.i))
+	}
+
+	notes := []struct {
+		d []byte
+		i int
+	}{
+		{[]byte("[^a]: text\n"), 6},
+		{[]byte("[^a]: text\n    more\n"), 6},
+		{[]byte("[^a]: text\n\n    more\n"), 6},
+		{[]byte("[^a]: text\nplain\n"), 6},
+		{[]byte("[^a]: text"), 6},
+		{[]byte(""), 0},
+	}
+	for _, c := range notes {
+		fmt.Fprintf(f, "N %s %d %s\n", hex.EncodeToString(c.d), c.i,
+			safeScanFootnote(c.d, c.i))
+	}
+}
