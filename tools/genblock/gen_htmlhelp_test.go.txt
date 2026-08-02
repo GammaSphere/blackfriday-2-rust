@@ -1,0 +1,115 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Measured answers for
+// the HTML renderer's pure helpers.
+
+func TestZZGenHTMLHelp(t *testing.T) {
+	f, err := os.Create("htmlhelp-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	// ensureUniqueHeadingID, applied in sequence to one renderer
+	r := NewHTMLRenderer(HTMLRendererParameters{})
+	for _, id := range []string{"foo", "foo", "foo", "bar", "foo-1", "foo", "baz", "baz"} {
+		fmt.Fprintf(f, "U %s %s\n", id, r.ensureUniqueHeadingID(id))
+	}
+
+	// isRelativeLink
+	links := []string{
+		"#frag", "/root", "/", "//example.com/x", "./here", "../up",
+		"http://example.com", "mailto:a@b.c", "plain.html", "?q=1", "a/b",
+	}
+	for _, l := range links {
+		fmt.Fprintf(f, "R %s %v\n", hex.EncodeToString([]byte(l)), isRelativeLink([]byte(l)))
+	}
+
+	// addAbsPrefix
+	rp := NewHTMLRenderer(HTMLRendererParameters{AbsolutePrefix: "http://x"})
+	for _, l := range links {
+		fmt.Fprintf(f, "A %s %s\n", hex.EncodeToString([]byte(l)),
+			hex.EncodeToString(rp.addAbsPrefix([]byte(l))))
+	}
+
+	// appendLinkAttrs
+	flagSets := []HTMLFlags{
+		0, NofollowLinks, NoreferrerLinks, NoopenerLinks, HrefTargetBlank,
+		NofollowLinks | NoreferrerLinks,
+		NofollowLinks | NoreferrerLinks | NoopenerLinks,
+		HrefTargetBlank | NoopenerLinks,
+	}
+	for _, fl := range flagSets {
+		for _, l := range []string{"http://x", "/rel", "#f"} {
+			got := appendLinkAttrs([]string{}, fl, []byte(l))
+			joined := strings.Join(got, "|")
+			if joined == "" {
+				joined = "-"
+			}
+			fmt.Fprintf(f, "L %d %s %s\n", int(fl), hex.EncodeToString([]byte(l)),
+				hex.EncodeToString([]byte(joined)))
+		}
+	}
+
+	// appendLanguageAttr
+	for _, info := range []string{"", "go", "go linenums", "go\ttabbed", " leading", "c++"} {
+		got := appendLanguageAttr([]string{}, []byte(info))
+		joined := strings.Join(got, "|")
+		if joined == "" {
+			joined = "-"
+		}
+		fmt.Fprintf(f, "G %s %s\n", hex.EncodeToString([]byte(info)),
+			hex.EncodeToString([]byte(joined)))
+	}
+
+	// findHTMLTagPos / isHTMLTag
+	type tc struct {
+		tag  string
+		name string
+	}
+	for _, c := range []tc{
+		{"<div>", "div"}, {"<DIV>", "div"}, {"<DiV class=x>", "div"},
+		{"</div>", "div"}, {"<span>", "div"}, {"div>", "div"},
+		{"<div", "div"}, {"<", "div"}, {"", "div"},
+		{"< div>", "div"}, {"</ div>", "div"},
+		{"<div class='a>b'>", "div"}, {"<div class=\"a>b\">", "div"},
+	} {
+		found, pos := findHTMLTagPos([]byte(c.tag), c.name)
+		fmt.Fprintf(f, "T %s %s %v %d\n", hex.EncodeToString([]byte(c.tag)), c.name, found, pos)
+	}
+
+	// skipUntilCharIgnoreQuotes
+	for _, s := range []string{"abc", "ab>c", "a'>'b>", "a\">\"b>", "a`>`b>", ">", ""} {
+		fmt.Fprintf(f, "S %s %d\n", hex.EncodeToString([]byte(s)),
+			skipUntilCharIgnoreQuotes([]byte(s), 0, '>'))
+	}
+
+	// cellAlignment
+	for _, a := range []CellAlignFlags{
+		0, TableAlignmentLeft, TableAlignmentRight, TableAlignmentCenter,
+		TableAlignmentLeft | TableAlignmentRight,
+	} {
+		fmt.Fprintf(f, "C %d %s\n", int(a), hex.EncodeToString([]byte(cellAlignment(a))))
+	}
+
+	// headingTagsFromLevel
+	for _, lvl := range []int{-5, 0, 1, 2, 3, 4, 5, 6, 7, 99} {
+		o, c := headingTagsFromLevel(lvl)
+		fmt.Fprintf(f, "H %d %s %s\n", lvl, hex.EncodeToString(o), hex.EncodeToString(c))
+	}
+
+	// footnote helpers
+	fmt.Fprintf(f, "F %s\n", hex.EncodeToString(footnoteItem("pre-", []byte("slug"))))
+	fmt.Fprintf(f, "F %s\n", hex.EncodeToString(footnoteReturnLink("pre-", "back", []byte("slug"))))
+
+	// default footnote return link contents
+	fmt.Fprintf(f, "D %s\n", hex.EncodeToString([]byte(r.FootnoteReturnLinkContents)))
+}

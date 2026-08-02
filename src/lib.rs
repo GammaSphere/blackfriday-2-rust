@@ -39,6 +39,7 @@ pub mod block;
 pub(crate) mod entities;
 pub mod esc;
 pub mod flags;
+pub mod html;
 pub(crate) mod html_entities;
 pub mod markdown;
 pub mod node;
