@@ -1,0 +1,15 @@
+[package]
+name = "blackfriday-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "C ABI over the blackfriday port, so the original Go test suite can drive it"
+license = "BSD-2-Clause"
+publish = false
+
+[lib]
+name = "blackfriday_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+blackfriday = { path = ".." }

@@ -224,7 +224,7 @@ fn trim_space(data: &[u8]) -> &[u8] {
 /// non-empty value that does not match rejects the line. This is one of the two
 /// unexported functions the pinned suite calls directly
 /// (`TestIsFenceLine`, `block_test.go:1864`).
-pub(crate) fn is_fence_line(
+pub fn is_fence_line(
     data: &[u8],
     info: Option<&mut Vec<u8>>,
     old_marker: &[u8],

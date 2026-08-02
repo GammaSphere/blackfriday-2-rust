@@ -36,6 +36,21 @@ verify-hashes:
 		echo "all 52 files match" && \
 		echo -n "manifest: " && sha256sum SHA256SUMS | cut -d' ' -f1
 
+## parity: run the original Go suite, unmodified, against this port
+##
+## Assembles a scratch package from the cgo-free adapter and the pinned test
+## files. The pinned files are copied rather than kept alongside the adapter so
+## that exactly one copy of them exists in the repository -- the one
+## verify-hashes checks.
+.PHONY: parity
+parity: verify-hashes
+	$(CARGO) build --release -p blackfriday-harness
+	rm -rf target/parity && mkdir -p target/parity
+	cp adapter/go.mod adapter/blackfriday.go target/parity/
+	cp tests/original/*_test.go target/parity/
+	cp -r tests/original/testdata target/parity/
+	cd target/parity && BF_SERVE=../release/bf-serve go test -v ./...
+
 ## check: everything CI would run
 check: fmt lint test verify-hashes
 

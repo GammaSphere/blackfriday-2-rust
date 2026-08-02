@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "ffi", "harness"]
+
 [package]
 name = "blackfriday"
 version = "0.1.0"

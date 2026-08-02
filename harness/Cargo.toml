@@ -1,0 +1,15 @@
+[package]
+name = "blackfriday-harness"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Serves the port over a pipe, so Go can drive it without a C toolchain"
+license = "BSD-2-Clause"
+publish = false
+
+[[bin]]
+name = "bf-serve"
+path = "src/main.rs"
+
+[dependencies]
+blackfriday = { path = ".." }

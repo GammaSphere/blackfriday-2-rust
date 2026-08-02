@@ -5,3 +5,17 @@ version = 3
 [[package]]
 name = "blackfriday"
 version = "0.1.0"
+
+[[package]]
+name = "blackfriday-ffi"
+version = "0.1.0"
+dependencies = [
+ "blackfriday",
+]
+
+[[package]]
+name = "blackfriday-harness"
+version = "0.1.0"
+dependencies = [
+ "blackfriday",
+]
