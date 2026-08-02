@@ -1,0 +1,127 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Emits measured Go
+// answers for tableHeader, tableRow and table, including the resulting tree
+// shape rather than only the returned sizes.
+
+// treeOf renders the document as "Type(content)[align,header]" per node, so a
+// parser that returns the right size while building the wrong tree still fails.
+func treeOf(n *Node, depth int) string {
+	var b strings.Builder
+	for c := n.FirstChild; c != nil; c = c.Next {
+		b.WriteString(strings.Repeat(">", depth))
+		content := c.content
+		if len(content) == 0 {
+			content = c.Literal
+		}
+		b.WriteString(fmt.Sprintf("%s(%s)", c.Type, hex.EncodeToString(content)))
+		if c.Type == TableCell {
+			b.WriteString(fmt.Sprintf("[%d,%v]", int(c.Align), c.IsHeader))
+		}
+		b.WriteString(";")
+		b.WriteString(treeOf(c, depth+1))
+	}
+	return b.String()
+}
+
+func safeHeader(d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New(WithExtensions(Tables))
+	size, cols := p.tableHeader(d)
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = fmt.Sprintf("%d", int(c))
+	}
+	joined := strings.Join(parts, ",")
+	if joined == "" {
+		joined = "-"
+	}
+	return fmt.Sprintf("%d %s %s", size, joined, orDash(treeOf(p.doc, 0)))
+}
+
+func safeTable(d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New(WithExtensions(Tables))
+	n := p.table(d)
+	return fmt.Sprintf("%d %s", n, orDash(treeOf(p.doc, 0)))
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func TestZZGenTable(t *testing.T) {
+	f, err := os.Create("table-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	cases := [][]byte{
+		[]byte(""),
+		[]byte("a | b\n--- | ---\n1 | 2\n"),
+		[]byte("| a | b |\n| --- | --- |\n| 1 | 2 |\n"),
+		[]byte("a | b\n:-- | --:\n1 | 2\n"),
+		[]byte("a | b\n:-: | ---\n1 | 2\n"),
+		[]byte("a | b | c\n--- | --- | ---\n1 | 2 | 3\n"),
+		[]byte("a\n---\n"),
+		[]byte("a | b\n-- | --\n"),
+		[]byte("a | b\n--- | ---\n"),
+		[]byte("a | b\n--- | --- | ---\n"),
+		[]byte("a | b | c\n--- | ---\n"),
+		[]byte("no pipes here\n"),
+		[]byte("a | b\n--- | ---\n1 | 2\nplain\n"),
+		[]byte("a | b\n--- | ---\n1 | 2 | 3\n"),
+		[]byte("a | b\n--- | ---\n1\n"),
+		[]byte("a | b"),
+		[]byte("a | b\n"),
+		[]byte("a | b\n--- | ---"),
+		{'a', ' ', '\\', '|', ' ', 'b', ' ', '|', ' ', 'c', '\n',
+			'-', '-', '-', ' ', '|', ' ', '-', '-', '-', '\n'},
+		[]byte("  a  |  b  \n--- | ---\n  1  |  2  \n"),
+		[]byte("a||b\n---|---|---\n"),
+	}
+	for _, d := range cases {
+		fmt.Fprintf(f, "H %s %s\n", hex.EncodeToString(d), safeHeader(d))
+		fmt.Fprintf(f, "T %s %s\n", hex.EncodeToString(d), safeTable(d))
+	}
+
+	// tableRow directly, with a fixed column spec
+	rows := [][]byte{
+		[]byte("1 | 2\n"), []byte("| 1 | 2 |\n"), []byte("1\n"),
+		[]byte("1 | 2 | 3\n"), []byte("  1  |  2  \n"), []byte("\n"),
+		[]byte("|\n"), []byte("||\n"),
+	}
+	cols := []CellAlignFlags{TableAlignmentLeft, TableAlignmentRight}
+	for _, d := range rows {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(f, "R %s PANIC\n", hex.EncodeToString(d))
+				}
+			}()
+			p := New(WithExtensions(Tables))
+			p.tableRow(d, cols, false)
+			fmt.Fprintf(f, "R %s %s\n", hex.EncodeToString(d), orDash(treeOf(p.doc, 0)))
+		}()
+	}
+}

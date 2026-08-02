@@ -1016,6 +1016,239 @@ impl Markdown {
         0
     }
 
+    /// Parses one table row, appending a `TableRow` and its cells.
+    ///
+    /// Ported from `tableRow` (`block.go:899`). Rows with too few cells are
+    /// padded with empty ones; rows with too many have the excess silently
+    /// dropped, since the loop is bounded by the column count.
+    ///
+    /// Cell boundaries respect backslash escaping, so `a \| b` is one cell.
+    ///
+    /// # Panics
+    ///
+    /// On empty input, matching upstream's unguarded `data[0]`.
+    pub(crate) fn table_row(
+        &mut self,
+        data: &[u8],
+        columns: &[crate::CellAlignFlags],
+        header: bool,
+    ) {
+        self.add_block(NodeType::TableRow, b"");
+        let mut i = 0usize;
+
+        if data[i] == b'|' && !is_backslash_escaped(data, i) {
+            i += 1;
+        }
+
+        let mut col = 0usize;
+        while col < columns.len() && i < data.len() {
+            while i < data.len() && data[i] == b' ' {
+                i += 1;
+            }
+
+            let cell_start = i;
+
+            while i < data.len()
+                && (data[i] != b'|' || is_backslash_escaped(data, i))
+                && data[i] != b'\n'
+            {
+                i += 1;
+            }
+
+            let mut cell_end = i;
+
+            // Skip the end-of-cell marker, possibly taking us past the end of
+            // the buffer. Upstream says so in a comment; `i` is only ever
+            // compared afterwards, never indexed, so it is safe on usize too.
+            i += 1;
+
+            while cell_end > cell_start && cell_end - 1 < data.len() && data[cell_end - 1] == b' ' {
+                cell_end -= 1;
+            }
+
+            let cell = self.add_block(NodeType::TableCell, &data[cell_start..cell_end]);
+            self.arena[cell].table_cell.is_header = header;
+            self.arena[cell].table_cell.align = columns[col];
+            col += 1;
+        }
+
+        // Pad out with empty columns to reach the right number.
+        while col < columns.len() {
+            let cell = self.add_block(NodeType::TableCell, b"");
+            self.arena[cell].table_cell.is_header = header;
+            self.arena[cell].table_cell.align = columns[col];
+            col += 1;
+        }
+
+        // Rows with too many cells are silently ignored.
+    }
+
+    /// Parses a table header and its alignment row.
+    ///
+    /// Ported from `tableHeader` (`block.go:786`). Returns how much input the
+    /// header consumed and the per-column alignment, or `0` when this is not a
+    /// table. On success it appends a `TableHead` and the header row.
+    ///
+    /// Go uses named return values, so its bare `return`s hand back `0`
+    /// alongside whatever `columns` had been built so far. Every caller
+    /// discards the columns when the size is `0`, so that is preserved without
+    /// mattering.
+    pub(crate) fn table_header(&mut self, data: &[u8]) -> (usize, Vec<crate::CellAlignFlags>) {
+        use crate::CellAlignFlags;
+
+        let mut i = 0usize;
+        let mut col_count = 1usize;
+        while i < data.len() && data[i] != b'\n' {
+            if data[i] == b'|' && !is_backslash_escaped(data, i) {
+                col_count += 1;
+            }
+            i += 1;
+        }
+
+        // Doesn't look like a table header.
+        if col_count == 1 {
+            return (0, Vec::new());
+        }
+
+        // Include the newline in the data sent to table_row.
+        let mut j = i;
+        if j < data.len() && data[j] == b'\n' {
+            j += 1;
+        }
+        let header = data[..j].to_vec();
+
+        // The column count ignores pipes at the start or end of the line.
+        if data[0] == b'|' {
+            col_count -= 1;
+        }
+        // Note `i > 2`, not `i > 0`: upstream's own bound.
+        if i > 2 && data[i - 1] == b'|' && !is_backslash_escaped(data, i - 1) {
+            col_count -= 1;
+        }
+
+        let mut columns = vec![CellAlignFlags::NONE; col_count];
+
+        // Move on to the header underline.
+        i += 1;
+        if i >= data.len() {
+            return (0, columns);
+        }
+
+        if data[i] == b'|' && !is_backslash_escaped(data, i) {
+            i += 1;
+        }
+        i = skip_char(data, i, b' ');
+
+        // Each column header is `/ *:?-+:? *|/` with dashes + colons >= 3, and
+        // a trailing `|` optional on the last column.
+        let mut col = 0usize;
+        while i < data.len() && data[i] != b'\n' {
+            let mut dashes = 0usize;
+
+            if data[i] == b':' {
+                i += 1;
+                columns[col] |= CellAlignFlags::LEFT;
+                dashes += 1;
+            }
+            while i < data.len() && data[i] == b'-' {
+                i += 1;
+                dashes += 1;
+            }
+            if i < data.len() && data[i] == b':' {
+                i += 1;
+                columns[col] |= CellAlignFlags::RIGHT;
+                dashes += 1;
+            }
+            while i < data.len() && data[i] == b' ' {
+                i += 1;
+            }
+            if i == data.len() {
+                return (0, columns);
+            }
+
+            // The end-of-column test, kept in upstream's order.
+            if dashes < 3 {
+                // Not a valid column.
+                return (0, columns);
+            } else if data[i] == b'|' && !is_backslash_escaped(data, i) {
+                // Marker found; skip past trailing whitespace.
+                col += 1;
+                i += 1;
+                while i < data.len() && data[i] == b' ' {
+                    i += 1;
+                }
+                // Trailing junk after the last column.
+                if col >= col_count && i < data.len() && data[i] != b'\n' {
+                    return (0, columns);
+                }
+            } else if (data[i] != b'|' || is_backslash_escaped(data, i)) && col + 1 < col_count {
+                // Something else where a marker was required.
+                return (0, columns);
+            } else if data[i] == b'\n' {
+                // The marker is optional for the last column.
+                col += 1;
+            } else {
+                // Trailing junk after the last column.
+                return (0, columns);
+            }
+        }
+        if col != col_count {
+            return (0, columns);
+        }
+
+        self.add_block(NodeType::TableHead, b"");
+        self.table_row(&header, &columns, true);
+        let mut size = i;
+        if size < data.len() && data[size] == b'\n' {
+            size += 1;
+        }
+        (size, columns)
+    }
+
+    /// Parses a whole table.
+    ///
+    /// Ported from `table` (`block.go:743`). Appends a `Table` node up front and
+    /// unlinks it again if the header turns out not to be one — the arena keeps
+    /// the storage, exactly as Go leaves the node to its GC.
+    ///
+    /// Body rows end at the first line containing no `|`.
+    pub(crate) fn table(&mut self, data: &[u8]) -> usize {
+        let table = self.add_block(NodeType::Table, b"");
+        let (mut i, columns) = self.table_header(data);
+        if i == 0 {
+            self.tip = self.arena[table].parent().unwrap_or(self.doc);
+            self.arena.unlink(table);
+            return 0;
+        }
+
+        self.add_block(NodeType::TableBody, b"");
+
+        while i < data.len() {
+            let mut pipes = 0usize;
+            let row_start = i;
+            while i < data.len() && data[i] != b'\n' {
+                if data[i] == b'|' {
+                    pipes += 1;
+                }
+                i += 1;
+            }
+
+            if pipes == 0 {
+                i = row_start;
+                break;
+            }
+
+            // Include the newline in the data sent to table_row.
+            if i < data.len() && data[i] == b'\n' {
+                i += 1;
+            }
+            let row = data[row_start..i].to_vec();
+            self.table_row(&row, &columns, false);
+        }
+
+        i
+    }
+
     /// Whether `data` begins an ATX heading.
     ///
     /// Ported from `isPrefixHeading` (`block.go:207`). With
@@ -2031,6 +2264,196 @@ mod tests {
             b"abc",
             "empty old is a no-op"
         );
+    }
+
+    /// Measured Go answers for the table scanners.
+    const TABLE_FIXTURE: &str = include_str!("../tests/fixtures/go-table.txt");
+
+    fn table_rows(tag: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+        TABLE_FIXTURE.lines().filter_map(move |l| {
+            let f: Vec<String> = l.split(' ').map(str::to_string).collect();
+            (f.first().map(String::as_str) == Some(tag)).then_some(f)
+        })
+    }
+
+    /// Mirrors the generator's `treeOf`: the document as a flat node listing,
+    /// so a scanner that returns the right size while building the wrong tree
+    /// still fails.
+    fn tree_of(p: &Markdown, node: NodeId, depth: usize) -> String {
+        let mut s = String::new();
+        for c in p.arena().children(node) {
+            s.push_str(&">".repeat(depth));
+            let n = &p.arena()[c];
+            let content: &[u8] = if n.content.is_empty() {
+                &n.literal
+            } else {
+                &n.content
+            };
+            s.push_str(&format!(
+                "{}({})",
+                n.node_type,
+                content
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ));
+            if n.node_type == NodeType::TableCell {
+                s.push_str(&format!(
+                    "[{},{}]",
+                    n.table_cell.align.bits(),
+                    n.table_cell.is_header
+                ));
+            }
+            s.push(';');
+            s.push_str(&tree_of(p, c, depth + 1));
+        }
+        s
+    }
+
+    fn or_dash(s: String) -> String {
+        if s.is_empty() {
+            "-".to_string()
+        } else {
+            s
+        }
+    }
+
+    #[test]
+    fn table_header_matches_go() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+        let mut n = 0;
+        for f in table_rows("H") {
+            let data = unhex(&f[1]);
+            let mut p = Markdown::new(Options::none().with_extensions(Extensions::TABLES));
+            let (size, cols) = p.table_header(&data);
+            let ctx = format!("table_header({:?})", String::from_utf8_lossy(&data));
+
+            assert_eq!(size, f[2].parse::<usize>().unwrap(), "{ctx} size");
+            let want_cols = if f[3] == "-" {
+                String::new()
+            } else {
+                f[3].clone()
+            };
+            let got_cols = cols
+                .iter()
+                .map(|c| c.bits().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            // Columns are only meaningful when size != 0; Go's named returns
+            // hand back a partially built slice otherwise.
+            if size != 0 {
+                assert_eq!(got_cols, want_cols, "{ctx} columns");
+            }
+            let doc = p.document();
+            assert_eq!(or_dash(tree_of(&p, doc, 0)), f[4], "{ctx} tree");
+            n += 1;
+        }
+        assert!(n >= 18, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn table_matches_go() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+        let mut n = 0;
+        for f in table_rows("T") {
+            let data = unhex(&f[1]);
+            let mut p = Markdown::new(Options::none().with_extensions(Extensions::TABLES));
+            let got = p.table(&data);
+            let ctx = format!("table({:?})", String::from_utf8_lossy(&data));
+            assert_eq!(got, f[2].parse::<usize>().unwrap(), "{ctx} size");
+            let doc = p.document();
+            assert_eq!(or_dash(tree_of(&p, doc, 0)), f[3], "{ctx} tree");
+            n += 1;
+        }
+        assert!(n >= 18, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn table_row_matches_go() {
+        use crate::markdown::Options;
+        use crate::CellAlignFlags;
+        use crate::Extensions;
+        let cols = [CellAlignFlags::LEFT, CellAlignFlags::RIGHT];
+        let mut n = 0;
+        for f in table_rows("R") {
+            let data = unhex(&f[1]);
+            let mut p = Markdown::new(Options::none().with_extensions(Extensions::TABLES));
+            p.table_row(&data, &cols, false);
+            let doc = p.document();
+            assert_eq!(
+                or_dash(tree_of(&p, doc, 0)),
+                f[2],
+                "table_row({:?})",
+                String::from_utf8_lossy(&data)
+            );
+            n += 1;
+        }
+        assert!(n >= 6, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn a_failed_table_leaves_no_node_behind() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+        // table() appends the Table node before it knows whether the header
+        // parses, and unlinks it again on failure.
+        let mut p = Markdown::new(Options::none().with_extensions(Extensions::TABLES));
+        assert_eq!(p.table(b"no pipes here\n"), 0);
+        assert_eq!(p.arena()[p.document()].first_child(), None);
+        assert_eq!(p.tip, p.document(), "the tip is restored too");
+    }
+
+    #[test]
+    fn table_alignment_comes_from_the_underline_colons() {
+        use crate::markdown::Options;
+        use crate::CellAlignFlags;
+        use crate::Extensions;
+        let cols = |src: &[u8]| {
+            let mut p = Markdown::new(Options::none().with_extensions(Extensions::TABLES));
+            p.table_header(src).1
+        };
+        assert_eq!(
+            cols(b"a | b\n:-- | --:\n"),
+            vec![CellAlignFlags::LEFT, CellAlignFlags::RIGHT]
+        );
+        assert_eq!(
+            cols(b"a | b\n:-: | ---\n"),
+            vec![CellAlignFlags::CENTER, CellAlignFlags::NONE],
+            "colons on both sides give CENTER, which is LEFT|RIGHT"
+        );
+    }
+
+    #[test]
+    fn rows_are_padded_and_truncated_to_the_column_count() {
+        use crate::markdown::Options;
+        use crate::CellAlignFlags;
+        use crate::Extensions;
+        let cells = |src: &[u8]| {
+            let mut p = Markdown::new(Options::none().with_extensions(Extensions::TABLES));
+            p.table_row(src, &[CellAlignFlags::NONE, CellAlignFlags::NONE], false);
+            let row = p.arena()[p.document()].first_child().unwrap();
+            p.arena()
+                .children(row)
+                .map(|c| p.arena()[c].content.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cells(b"1 | 2\n"), vec![b"1".to_vec(), b"2".to_vec()]);
+        // Too few: padded with empties.
+        assert_eq!(cells(b"1\n"), vec![b"1".to_vec(), b"".to_vec()]);
+        // Too many: the excess is silently dropped.
+        assert_eq!(cells(b"1 | 2 | 3\n"), vec![b"1".to_vec(), b"2".to_vec()]);
+    }
+
+    #[test]
+    fn escaped_pipes_do_not_split_cells() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+        let mut p = Markdown::new(Options::none().with_extensions(Extensions::TABLES));
+        let (size, cols) = p.table_header(b"a \\| b | c\n--- | ---\n");
+        assert_ne!(size, 0, "an escaped pipe still leaves two columns");
+        assert_eq!(cols.len(), 2);
     }
 
     #[test]
