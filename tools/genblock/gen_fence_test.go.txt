@@ -1,0 +1,96 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Emits measured Go
+// answers for isFenceLine, quotePrefix, terminateBlockquote and codePrefix.
+//
+// isFenceLine is called with info both nil and non-nil, because the nil case
+// skips the entire info-string branch and reaches a different return.
+
+func safeFence(d []byte, wantInfo bool, old string) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	var info string
+	var ip *string
+	if wantInfo {
+		ip = &info
+	}
+	end, marker := isFenceLine(d, ip, old)
+	return fmt.Sprintf("%d %s %s", end,
+		hex.EncodeToString([]byte(marker)), hex.EncodeToString([]byte(info)))
+}
+
+func TestZZGenFence(t *testing.T) {
+	f, err := os.Create("fence-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	p := New()
+
+	cases := [][]byte{
+		[]byte(""), []byte("`"), []byte("``"), []byte("```"), []byte("````"),
+		[]byte("~~~"), []byte("~~~~"), []byte("~~"),
+		[]byte("```\n"), []byte("~~~\n"), []byte("```go\n"), []byte("``` go\n"),
+		[]byte("```go"), []byte("```   go   \n"), []byte("``` go js \n"),
+		[]byte("   ```\n"), []byte("    ```\n"), []byte("  ```go\n"),
+		[]byte("```{go}\n"), []byte("``` {  go  }\n"), []byte("```{}\n"),
+		[]byte("```{go\n"), []byte("```{go}"), []byte("``` {go} extra\n"),
+		[]byte("```{\n}\n"),
+		[]byte("`````go\n"), []byte("~~~~~~ rust \n"),
+		[]byte("``` \n"), []byte("```\t\n"), []byte("```  \n"),
+		[]byte("*** \n"), []byte("abc\n"), []byte("   x```\n"),
+		[]byte("```go\ncode\n```\n"),
+		{'`', '`', '`', 0xff, 0xfe, '\n'},
+		{'`', '`', '`', '{', 0xff, '}', '\n'},
+	}
+	oldMarkers := []string{"", "```", "~~~", "````"}
+
+	for _, d := range cases {
+		for _, om := range oldMarkers {
+			fmt.Fprintf(f, "F %s %s %s %s\n", hex.EncodeToString(d),
+				hex.EncodeToString([]byte(om)),
+				safeFence(d, false, om), safeFence(d, true, om))
+		}
+	}
+
+	prefixCases := [][]byte{
+		[]byte(""), []byte(">"), []byte("> "), []byte(">x"), []byte(" >"),
+		[]byte("  >"), []byte("   >"), []byte("    >"), []byte("   > x"),
+		[]byte(" > "), []byte("x>"), []byte("\t>"), []byte(">>"),
+		[]byte("\t"), []byte("    "), []byte("     "), []byte("   "),
+		[]byte("\tcode"), []byte("    code"), []byte("   code"),
+	}
+	for _, d := range prefixCases {
+		fmt.Fprintf(f, "Q %s %d %d\n", hex.EncodeToString(d),
+			p.quotePrefix(d), p.codePrefix(d))
+	}
+
+	type tb struct {
+		data     []byte
+		beg, end int
+	}
+	for _, c := range []tb{
+		{[]byte("\n> x\n"), 0, 1},
+		{[]byte("\nx\n"), 0, 1},
+		{[]byte("> a\n\n> b\n"), 3, 4},
+		{[]byte("> a\n\nplain\n"), 3, 4},
+		{[]byte("\n"), 0, 1},
+		{[]byte("\n"), 0, 99},
+		{[]byte("a\n"), 0, 1},
+		{[]byte("  \n> x"), 0, 3},
+	} {
+		fmt.Fprintf(f, "T %s %d %d %v\n", hex.EncodeToString(c.data), c.beg, c.end,
+			p.terminateBlockquote(c.data, c.beg, c.end))
+	}
+}

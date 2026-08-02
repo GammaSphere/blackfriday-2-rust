@@ -156,6 +156,217 @@ pub(crate) fn is_underlined_heading(data: &[u8]) -> i32 {
     0
 }
 
+/// Decodes the first UTF-8 character of `data`, with its length in bytes.
+///
+/// Returns `None` at the end of input or on an invalid sequence. Go's
+/// `utf8.DecodeRune` yields `RuneError` for an invalid byte; since every caller
+/// here only asks "is this whitespace?", and `RuneError` is not whitespace,
+/// reporting `None` reaches the same decision without a full decoder.
+fn first_char(data: &[u8]) -> Option<(char, usize)> {
+    for n in 1..=4.min(data.len()) {
+        if let Ok(s) = std::str::from_utf8(&data[..n]) {
+            if let Some(c) = s.chars().next() {
+                return Some((c, n));
+            }
+        }
+    }
+    None
+}
+
+/// Decodes the last UTF-8 character of `data`, with its length in bytes.
+fn last_char(data: &[u8]) -> Option<(char, usize)> {
+    for n in 1..=4.min(data.len()) {
+        if let Ok(s) = std::str::from_utf8(&data[data.len() - n..]) {
+            if let Some(c) = s.chars().next() {
+                return Some((c, n));
+            }
+        }
+    }
+    None
+}
+
+/// Go's `strings.TrimSpace`, over bytes.
+///
+/// Operating on bytes rather than `&str` matters: the info string is a slice of
+/// the document and need not be valid UTF-8. Going through
+/// `String::from_utf8_lossy` would replace interior invalid bytes with U+FFFD,
+/// which Go does not do — Go's `string([]byte)` conversion is a reinterpretation,
+/// not a validation, so those bytes survive untouched.
+///
+/// `char::is_whitespace` is the Unicode `White_Space` property, and Go's
+/// `unicode.IsSpace` is the same set: its Latin-1 fast path lists exactly the
+/// `White_Space` members below U+0100, and it defers to the `White_Space` table
+/// above that.
+fn trim_space(data: &[u8]) -> &[u8] {
+    let mut s = data;
+    while let Some((c, n)) = first_char(s) {
+        if !c.is_whitespace() {
+            break;
+        }
+        s = &s[n..];
+    }
+    while let Some((c, n)) = last_char(s) {
+        if !c.is_whitespace() {
+            break;
+        }
+        s = &s[..s.len() - n];
+    }
+    s
+}
+
+/// Detects a code fence at the start of `data`.
+///
+/// Ported from `isFenceLine` (`block.go:572`). Returns the index just past the
+/// fence line (including its newline) and the marker run that opened it, or
+/// `(0, empty)` when there is no fence.
+///
+/// `info` mirrors Go's `info *string`: passing `None` skips the entire
+/// info-string branch, which is not merely an optimisation — it changes which
+/// `return` is reached, and therefore the end index, for input that ends
+/// immediately after the marker.
+///
+/// `old_marker` is the opening marker when looking for a closing fence; a
+/// non-empty value that does not match rejects the line. This is one of the two
+/// unexported functions the pinned suite calls directly
+/// (`TestIsFenceLine`, `block_test.go:1864`).
+pub(crate) fn is_fence_line(
+    data: &[u8],
+    info: Option<&mut Vec<u8>>,
+    old_marker: &[u8],
+) -> (usize, Vec<u8>) {
+    let mut i = 0usize;
+    let mut size = 0usize;
+
+    // Skip up to three spaces. Unlike is_hrule, this one is length-guarded.
+    while i < data.len() && i < 3 && data[i] == b' ' {
+        i += 1;
+    }
+
+    if i >= data.len() {
+        return (0, Vec::new());
+    }
+    if data[i] != b'~' && data[i] != b'`' {
+        return (0, Vec::new());
+    }
+    let c = data[i];
+
+    while i < data.len() && data[i] == c {
+        size += 1;
+        i += 1;
+    }
+
+    if size < 3 {
+        return (0, Vec::new());
+    }
+    let marker = data[i - size..i].to_vec();
+
+    // A closing fence must use the same marker as the opening one.
+    if !old_marker.is_empty() && marker != old_marker {
+        return (0, Vec::new());
+    }
+
+    if let Some(info_out) = info {
+        let mut info_length = 0usize;
+        i = skip_char(data, i, b' ');
+
+        if i >= data.len() {
+            // Go writes `if i >= len(data) { if i == len(data) {...}; return 0 }`.
+            // `i > len(data)` is unreachable, so the inner test is always true.
+            return (i, marker);
+        }
+
+        let mut info_start = i;
+
+        if data[i] == b'{' {
+            i += 1;
+            info_start += 1;
+
+            while i < data.len() && data[i] != b'}' && data[i] != b'\n' {
+                info_length += 1;
+                i += 1;
+            }
+
+            if i >= data.len() || data[i] != b'}' {
+                return (0, Vec::new());
+            }
+
+            // Strip whitespace inside the braces.
+            while info_length > 0 && crate::util::is_space(data[info_start]) {
+                info_start += 1;
+                info_length -= 1;
+            }
+            while info_length > 0 && crate::util::is_space(data[info_start + info_length - 1]) {
+                info_length -= 1;
+            }
+            i += 1;
+            i = skip_char(data, i, b' ');
+        } else {
+            while i < data.len() && !crate::util::is_vertical_space(data[i]) {
+                info_length += 1;
+                i += 1;
+            }
+        }
+
+        info_out.clear();
+        info_out.extend_from_slice(trim_space(&data[info_start..info_start + info_length]));
+    }
+
+    if i == data.len() {
+        return (i, marker);
+    }
+    // Go also tests `i > len(data)` here, which cannot happen.
+    if data[i] != b'\n' {
+        return (0, Vec::new());
+    }
+    (i + 1, marker) // Take the newline into account.
+}
+
+/// Length of a blockquote prefix, or `0`.
+///
+/// Ported from `quotePrefix` (`block.go:943`). A single space after the `>` is
+/// consumed as part of the prefix; a second one is not.
+pub(crate) fn quote_prefix(data: &[u8]) -> usize {
+    let mut i = 0usize;
+    while i < 3 && i < data.len() && data[i] == b' ' {
+        i += 1;
+    }
+    if i < data.len() && data[i] == b'>' {
+        if i + 1 < data.len() && data[i + 1] == b' ' {
+            return i + 2;
+        }
+        return i + 1;
+    }
+    0
+}
+
+/// Length of an indented-code prefix, or `0`.
+///
+/// Ported from `codePrefix` (`block.go:1008`). A tab counts as one byte of
+/// prefix; spaces must number exactly four.
+pub(crate) fn code_prefix(data: &[u8]) -> usize {
+    if !data.is_empty() && data[0] == b'\t' {
+        return 1;
+    }
+    if data.len() >= 4 && &data[..4] == b"    " {
+        return 4;
+    }
+    0
+}
+
+/// Whether a blockquote ends at this point.
+///
+/// Ported from `terminateBlockquote` (`block.go:959`): a blank line followed by
+/// something that is neither a quote prefix nor another blank line.
+pub(crate) fn terminate_blockquote(data: &[u8], beg: usize, end: usize) -> bool {
+    if is_empty(&data[beg..]) == 0 {
+        return false;
+    }
+    if end >= data.len() {
+        return true;
+    }
+    quote_prefix(&data[end..]) == 0 && is_empty(&data[end..]) == 0
+}
+
 impl Markdown {
     /// Appends a block of `typ` holding `content`, closing anything unmatched.
     ///
@@ -657,6 +868,172 @@ mod tests {
             n += 1;
         }
         assert!(n >= 5);
+    }
+
+    /// Measured Go answers for the fence and prefix scanners.
+    const FENCE_FIXTURE: &str = include_str!("../tests/fixtures/go-fence.txt");
+
+    fn fence_rows(tag: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+        FENCE_FIXTURE.lines().filter_map(move |l| {
+            let f: Vec<String> = l.split(' ').map(str::to_string).collect();
+            (f.first().map(String::as_str) == Some(tag)).then_some(f)
+        })
+    }
+
+    #[test]
+    fn is_fence_line_matches_go_with_and_without_an_info_pointer() {
+        let mut n = 0;
+        for f in fence_rows("F") {
+            let data = unhex(&f[1]);
+            let old = unhex(&f[2]);
+            let ctx = || {
+                format!(
+                    "is_fence_line({:?}, old={:?})",
+                    String::from_utf8_lossy(&data),
+                    String::from_utf8_lossy(&old)
+                )
+            };
+
+            // info = nil
+            let (end, marker) = is_fence_line(&data, None, &old);
+            assert_eq!(end, f[3].parse::<usize>().unwrap(), "{} end [nil]", ctx());
+            assert_eq!(marker, unhex(&f[4]), "{} marker [nil]", ctx());
+
+            // info = &s
+            let mut info = Vec::new();
+            let (end, marker) = is_fence_line(&data, Some(&mut info), &old);
+            assert_eq!(end, f[6].parse::<usize>().unwrap(), "{} end [info]", ctx());
+            assert_eq!(marker, unhex(&f[7]), "{} marker [info]", ctx());
+            assert_eq!(info, unhex(&f[8]), "{} info", ctx());
+            n += 1;
+        }
+        assert!(n >= 100, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn quote_and_code_prefix_match_go() {
+        let mut n = 0;
+        for f in fence_rows("Q") {
+            let data = unhex(&f[1]);
+            assert_eq!(
+                quote_prefix(&data),
+                f[2].parse::<usize>().unwrap(),
+                "quote_prefix({:?})",
+                String::from_utf8_lossy(&data)
+            );
+            assert_eq!(
+                code_prefix(&data),
+                f[3].parse::<usize>().unwrap(),
+                "code_prefix({:?})",
+                String::from_utf8_lossy(&data)
+            );
+            n += 1;
+        }
+        assert!(n >= 15);
+    }
+
+    #[test]
+    fn terminate_blockquote_matches_go() {
+        let mut n = 0;
+        for f in fence_rows("T") {
+            let data = unhex(&f[1]);
+            let beg: usize = f[2].parse().unwrap();
+            let end: usize = f[3].parse().unwrap();
+            assert_eq!(
+                terminate_blockquote(&data, beg, end),
+                f[4] == "true",
+                "terminate_blockquote({:?}, {beg}, {end})",
+                String::from_utf8_lossy(&data)
+            );
+            n += 1;
+        }
+        assert!(n >= 5);
+    }
+
+    #[test]
+    fn the_info_pointer_changes_the_result_not_just_the_output() {
+        // Passing nil skips the entire brace branch, so a `{` is simply "not a
+        // newline" and the fence is rejected. With an info pointer the braces
+        // are consumed and the same input is a valid fence. Measured, not
+        // guessed -- my first attempt at this test asserted the wrong pair.
+        assert_eq!(is_fence_line(b"```{go}", None, b"").0, 0);
+        let mut info = Vec::new();
+        assert_eq!(is_fence_line(b"```{go}", Some(&mut info), b"").0, 7);
+        assert_eq!(info, b"go");
+
+        // Where there is nothing after the marker at all, both agree.
+        assert_eq!(is_fence_line(b"```", None, b"").0, 3);
+        let mut info = Vec::new();
+        assert_eq!(is_fence_line(b"```", Some(&mut info), b"").0, 3);
+    }
+
+    #[test]
+    fn info_is_written_even_when_the_fence_is_then_rejected() {
+        // Go assigns *info before the trailing-newline check, so a rejected
+        // fence can still leave the caller's info string modified. Preserved
+        // deliberately: a caller reusing one buffer across calls would see it.
+        let mut info = Vec::new();
+        let (end, marker) = is_fence_line(b"``` {go} extra\n", Some(&mut info), b"");
+        assert_eq!((end, marker.as_slice()), (0, &b""[..]));
+        assert_eq!(info, b"go", "info was set before the rejection");
+    }
+
+    #[test]
+    fn fence_marker_must_match_the_opening_one() {
+        let (end, marker) = is_fence_line(b"```\n", None, b"");
+        assert_eq!((end, marker.as_slice()), (4, &b"```"[..]));
+        // A closing fence with a different marker is rejected.
+        assert_eq!(is_fence_line(b"~~~\n", None, b"```").0, 0);
+        assert_eq!(is_fence_line(b"```\n", None, b"~~~").0, 0);
+        // Same character but a different length is also a mismatch.
+        assert_eq!(is_fence_line(b"````\n", None, b"```").0, 0);
+    }
+
+    #[test]
+    fn fence_needs_three_markers_and_at_most_three_leading_spaces() {
+        assert_eq!(is_fence_line(b"``\n", None, b"").0, 0);
+        assert_eq!(is_fence_line(b"~~\n", None, b"").0, 0);
+        assert_eq!(is_fence_line(b"   ```\n", None, b"").0, 7);
+        assert_eq!(
+            is_fence_line(b"    ```\n", None, b"").0,
+            0,
+            "four is too many"
+        );
+    }
+
+    #[test]
+    fn fence_info_string_is_trimmed_and_braces_are_stripped() {
+        let info_of = |src: &[u8]| {
+            let mut info = Vec::new();
+            is_fence_line(src, Some(&mut info), b"");
+            info
+        };
+        assert_eq!(info_of(b"```go\n"), b"go");
+        assert_eq!(info_of(b"```   go   \n"), b"go");
+        assert_eq!(info_of(b"```{go}\n"), b"go");
+        assert_eq!(info_of(b"``` {  go  }\n"), b"go");
+        assert_eq!(info_of(b"```{}\n"), b"");
+        assert_eq!(info_of(b"```\n"), b"");
+        // An unclosed brace rejects the fence either way: with an info pointer
+        // the scan runs out looking for `}`, and without one the `{` simply is
+        // not the newline the fence needs.
+        assert_eq!(is_fence_line(b"```{go\n", None, b"").0, 0);
+        let mut info = Vec::new();
+        assert_eq!(is_fence_line(b"```{go\n", Some(&mut info), b"").0, 0);
+    }
+
+    #[test]
+    fn trim_space_keeps_interior_invalid_utf8() {
+        // The reason trim_space works on bytes: from_utf8_lossy would rewrite
+        // the 0xff to U+FFFD, which Go's string([]byte) conversion does not.
+        assert_eq!(trim_space(b"  a\xffb  "), b"a\xffb");
+        assert_eq!(trim_space(b"\xff"), b"\xff");
+        assert_eq!(trim_space(b"  "), b"");
+        assert_eq!(trim_space(b""), b"");
+        assert_eq!(trim_space(b"a"), b"a");
+        assert_eq!(trim_space(b"\t x \n"), b"x");
+        // Unicode whitespace counts, matching unicode.IsSpace.
+        assert_eq!(trim_space("\u{a0}x\u{2003}".as_bytes()), b"x");
     }
 
     #[test]
