@@ -1,0 +1,212 @@
+package blackfriday
+
+import (
+	"bytes"
+	"encoding/hex"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"sort"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Verifies the HTML
+// renderer independently of the parser.
+//
+// The port's inline parser does not exist yet, so there is no way to get a
+// syntax tree on the Rust side from Markdown source. Instead this dumps the
+// tree Go's parser produced -- every field the renderer can read, in walk
+// order with a depth column -- and then the HTML Go rendered from it. The Rust
+// test rebuilds that exact tree in its arena and renders it, so any difference
+// is the renderer's, with the parser held constant.
+//
+// The tree is dumped *before* rendering on purpose: writeTOC rewrites every
+// heading id, and reproducing that rewrite is part of what is under test.
+
+func TestZZGenRender(t *testing.T) {
+	f, err := os.Create("render-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	type sample struct {
+		name string
+		src  string
+	}
+	samples := []sample{
+		{"empty", ""},
+		{"para", "hello world\n"},
+		{"two-paras", "one\n\ntwo\n"},
+		{"emph", "*a* **b** ***c***\n"},
+		{"heading", "# h1\n\n## h2\n\n###### h6\n"},
+		{"setext", "title\n=====\n\nsub\n---\n"},
+		{"hr", "---\n\ntext\n\n***\n"},
+		{"blockquote", "> quoted\n>\n> more\n"},
+		{"nested-quote", "> a\n>\n> > b\n"},
+		{"ul", "- a\n- b\n- c\n"},
+		{"ol", "1. a\n2. b\n"},
+		{"loose-list", "- a\n\n- b\n"},
+		{"nested-list", "- a\n    - b\n        - c\n"},
+		{"list-with-para", "- a\n\n  para\n\n- b\n"},
+		{"list-with-code", "- a\n\n        code\n"},
+		{"code-indent", "    x = 1\n    y = 2\n"},
+		{"code-fenced", "```go\nfunc main() {}\n```\n"},
+		{"code-fenced-noinfo", "```\nplain\n```\n"},
+		{"inline-code", "a `code` b\n"},
+		{"link", "[text](http://x.com)\n"},
+		{"link-title", "[text](http://x.com \"the title\")\n"},
+		{"link-relative", "[text](/rel/path)\n"},
+		{"link-unsafe", "[text](javascript:alert(1))\n"},
+		{"image", "![alt](img.png)\n"},
+		{"image-title", "![alt](img.png \"cap\")\n"},
+		{"image-in-link", "[![alt](img.png)](http://x.com)\n"},
+		{"autolink", "<http://x.com> and <a@b.com>\n"},
+		{"html-block", "<div>\n  <p>raw</p>\n</div>\n"},
+		{"html-span", "a <b>bold</b> c\n"},
+		{"hardbreak", "a  \nb\n"},
+		{"backslash-break", "a\\\nb\n"},
+		{"entities", "AT&T < > \" '\n"},
+		{"smart-punct", `"quoted" -- it's a 1/2 (c) test...`},
+		{"table", "| a | b |\n|---|---|\n| 1 | 2 |\n"},
+		{"table-align", "| l | c | r |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n"},
+		{"table-empty-body", "| a | b |\n|---|---|\n"},
+		{"strikethrough", "~~gone~~\n"},
+		{"footnote", "text[^1]\n\n[^1]: the note\n"},
+		{"footnote-two", "a[^x] b[^y]\n\n[^x]: one\n\n[^y]: two\n"},
+		{"deflist", "term\n:   definition\n"},
+		{"titleblock", "%% the title\n\nbody\n"},
+		{"toc-doc", "# One\n\ntext\n\n## Two\n\nmore\n\n# Three\n"},
+		{"toc-skip-levels", "# a\n\n### deep\n\n## back\n"},
+		{"dup-headings", "# same\n\n# same\n\n# same\n"},
+		{"heading-with-id", "# heading {#custom}\n"},
+		{"mixed", "# Title\n\nPara with *emph*, `code`, and a [link](x).\n\n- item\n- item\n\n> quote\n\n    code\n"},
+	}
+
+	// Upstream's own test documents, which exercise combinations no
+	// hand-written sample would think of.
+	files, _ := filepath.Glob("testdata/*.text")
+	sort.Strings(files)
+	for _, path := range files {
+		b, err := ioutil.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		samples = append(samples, sample{"testdata/" + filepath.Base(path), string(b)})
+	}
+
+	type config struct {
+		name   string
+		ext    Extensions
+		params HTMLRendererParameters
+	}
+	configs := []config{
+		{"default", CommonExtensions, HTMLRendererParameters{Flags: CommonHTMLFlags}},
+		{"no-ext", NoExtensions, HTMLRendererParameters{}},
+		{"all-ext", CommonExtensions | Titleblock | DefinitionLists | Footnotes |
+			HeadingIDs | AutoHeadingIDs | Tables | Strikethrough | BackslashLineBreak |
+			SpaceHeadings | HardLineBreak,
+			HTMLRendererParameters{Flags: CommonHTMLFlags}},
+		{"xhtml", CommonExtensions, HTMLRendererParameters{Flags: CommonHTMLFlags | UseXHTML}},
+		{"skip-html", CommonExtensions, HTMLRendererParameters{Flags: SkipHTML}},
+		{"skip-images", CommonExtensions, HTMLRendererParameters{Flags: SkipImages}},
+		{"skip-links", CommonExtensions, HTMLRendererParameters{Flags: SkipLinks}},
+		{"safelink", CommonExtensions, HTMLRendererParameters{Flags: Safelink}},
+		{"nofollow", CommonExtensions, HTMLRendererParameters{
+			Flags: NofollowLinks | NoreferrerLinks | NoopenerLinks | HrefTargetBlank}},
+		{"complete", CommonExtensions, HTMLRendererParameters{
+			Flags: CommonHTMLFlags | CompletePage, Title: "A Title", CSS: "a.css", Icon: "i.ico"}},
+		{"complete-xhtml", CommonExtensions, HTMLRendererParameters{
+			Flags: CommonHTMLFlags | CompletePage | UseXHTML, Title: "T & T", CSS: "a.css"}},
+		{"toc", CommonExtensions | AutoHeadingIDs, HTMLRendererParameters{Flags: CommonHTMLFlags | TOC}},
+		{"toc-complete", CommonExtensions | AutoHeadingIDs, HTMLRendererParameters{
+			Flags: CommonHTMLFlags | TOC | CompletePage, Title: "TOC"}},
+		{"footnote-links", CommonExtensions | Footnotes, HTMLRendererParameters{
+			Flags: CommonHTMLFlags | FootnoteReturnLinks, FootnoteAnchorPrefix: "pre-"}},
+		{"heading-affix", CommonExtensions | AutoHeadingIDs, HTMLRendererParameters{
+			Flags: CommonHTMLFlags, HeadingIDPrefix: "p-", HeadingIDSuffix: "-s"}},
+		{"heading-offset", CommonExtensions | AutoHeadingIDs, HTMLRendererParameters{
+			Flags: CommonHTMLFlags, HeadingLevelOffset: 2}},
+		{"heading-offset-neg", CommonExtensions | AutoHeadingIDs, HTMLRendererParameters{
+			Flags: CommonHTMLFlags, HeadingLevelOffset: -3}},
+		{"abs-prefix", CommonExtensions, HTMLRendererParameters{
+			Flags: CommonHTMLFlags, AbsolutePrefix: "http://host"}},
+		{"smarty-off", CommonExtensions, HTMLRendererParameters{Flags: UseXHTML}},
+		{"smarty-angled", CommonExtensions, HTMLRendererParameters{
+			Flags: Smartypants | SmartypantsAngledQuotes | SmartypantsQuotesNBSP}},
+		{"smarty-fractions", CommonExtensions, HTMLRendererParameters{
+			Flags: Smartypants | SmartypantsFractions | SmartypantsDashes}},
+	}
+
+	caseID := 0
+	for _, cfg := range configs {
+		for _, s := range samples {
+			p := New(WithExtensions(cfg.ext))
+			ast := p.Parse([]byte(s.src))
+
+			fmt.Fprintf(f, "C %d %s %s\n", caseID, cfg.name,
+				hex.EncodeToString([]byte(s.name)))
+			dumpTree(f, caseID, ast)
+
+			r := NewHTMLRenderer(cfg.params)
+			var buf bytes.Buffer
+			r.RenderHeader(&buf, ast)
+			ast.Walk(func(node *Node, entering bool) WalkStatus {
+				return r.RenderNode(&buf, node, entering)
+			})
+			r.RenderFooter(&buf, ast)
+
+			fmt.Fprintf(f, "P %d %s\n", caseID, dumpParams(cfg.params))
+			fmt.Fprintf(f, "O %d %s\n", caseID, hex.EncodeToString(buf.Bytes()))
+			caseID++
+		}
+	}
+	fmt.Fprintf(f, "# cases=%d\n", caseID)
+}
+
+// dumpTree writes one N line per node, in walk order, with a depth column.
+// Depth plus order is enough to rebuild the tree exactly.
+func dumpTree(f *os.File, caseID int, ast *Node) {
+	depth := 0
+	ast.Walk(func(node *Node, entering bool) WalkStatus {
+		if !entering {
+			depth--
+			return GoToNext
+		}
+		fmt.Fprintf(f, "N %d %d %d %s %d %s %v %d %v %s %v %s %s %d %s %v %d\n",
+			caseID, depth, int(node.Type),
+			hexOrDash(node.Literal),
+			node.Level, hexOrDash([]byte(node.HeadingID)), node.IsTitleblock,
+			int(node.ListFlags), node.Tight, hexOrDash(node.RefLink), node.IsFootnotesList,
+			hexOrDash(node.Destination), hexOrDash(node.Title), node.NoteID,
+			hexOrDash(node.Info), node.IsHeader, int(node.Align))
+		if node.IsContainer() {
+			depth++
+		}
+		return GoToNext
+	})
+}
+
+// hexOrDash keeps nil distinguishable from empty: Image tests Title against
+// nil, not against length.
+func hexOrDash(b []byte) string {
+	if b == nil {
+		return "-"
+	}
+	return "x" + hex.EncodeToString(b)
+}
+
+func dumpParams(p HTMLRendererParameters) string {
+	return fmt.Sprintf("%d %s %s %s %s %s %d %s %s %s",
+		int(p.Flags),
+		hexOrDash([]byte(p.AbsolutePrefix)),
+		hexOrDash([]byte(p.FootnoteAnchorPrefix)),
+		hexOrDash([]byte(p.FootnoteReturnLinkContents)),
+		hexOrDash([]byte(p.HeadingIDPrefix)),
+		hexOrDash([]byte(p.HeadingIDSuffix)),
+		p.HeadingLevelOffset,
+		hexOrDash([]byte(p.Title)),
+		hexOrDash([]byte(p.CSS)),
+		hexOrDash([]byte(p.Icon)))
+}

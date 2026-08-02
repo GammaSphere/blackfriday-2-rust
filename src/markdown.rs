@@ -225,9 +225,12 @@ pub trait Renderer {
 
     /// Writes any content preceding the document body.
     ///
-    /// Receives the whole tree, since a renderer may need to inspect it — the
-    /// HTML renderer builds its table of contents here.
-    fn render_header(&mut self, out: &mut Vec<u8>, arena: &Arena, ast: NodeId);
+    /// Receives the whole tree **mutably**, since a renderer may need to
+    /// rewrite it before the body pass: the HTML renderer builds its table of
+    /// contents here, and doing so replaces every heading's id with `toc_N` so
+    /// that the anchors it emits resolve. Go hides that behind a pointer; here
+    /// it has to be in the signature.
+    fn render_header(&mut self, out: &mut Vec<u8>, arena: &mut Arena, ast: NodeId);
 
     /// Writes any content following the document body.
     fn render_footer(&mut self, out: &mut Vec<u8>, arena: &Arena, ast: NodeId);

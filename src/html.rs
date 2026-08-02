@@ -10,8 +10,10 @@
 // commit. Until then only the tests reach them.
 #![allow(dead_code)]
 
+use crate::esc::{esc_link, escape_all_html, escape_html};
 use crate::flags::{CellAlignFlags, HtmlFlags};
-use crate::node::{Arena, NodeId, NodeType};
+use crate::markdown::Renderer;
+use crate::node::{Arena, NodeId, NodeType, WalkStatus, Walker};
 use crate::smartypants::SpRenderer;
 use std::collections::HashMap;
 
@@ -742,6 +744,575 @@ pub(crate) fn heading_tags_from_level(level: i32) -> (&'static [u8], &'static [u
         4 => (b"<h4", b"</h4>"),
         5 => (b"<h5", b"</h5>"),
         _ => (b"<h6", b"</h6>"),
+    }
+}
+
+/// The opening `<div>` around a footnote list.
+const FOOTNOTES_DIV: &[u8] = b"\n<div class=\"footnotes\">\n\n";
+/// The matching closing `</div>`.
+const FOOTNOTES_CLOSE_DIV: &[u8] = b"\n</div>\n";
+
+impl HtmlRenderer {
+    /// Writes `<hr>` or `<hr />` depending on the XHTML flag.
+    ///
+    /// Ported from `outHRTag` (`html.go:490`).
+    fn out_hr_tag(&mut self, out: &mut Vec<u8>) {
+        if !self.params.flags.intersects(HtmlFlags::USE_XHTML) {
+            self.out(out, b"<hr>");
+        } else {
+            self.out(out, b"<hr />");
+        }
+    }
+
+    /// Writes the `<html><head>…<body>` preamble.
+    ///
+    /// Ported from `writeDocumentHeader` (`html.go:851`). Every write here is
+    /// direct rather than through [`Self::out`], so `last_output_len` is left
+    /// alone and the first [`Self::cr`] of the body still writes nothing.
+    ///
+    /// The title is **not escaped** when smartypants is on, which is how
+    /// `BUGS.md`'s third bug is reached.
+    fn write_document_header(&mut self, out: &mut Vec<u8>) {
+        if !self.params.flags.intersects(HtmlFlags::COMPLETE_PAGE) {
+            return;
+        }
+        let ending: &[u8] = if self.params.flags.intersects(HtmlFlags::USE_XHTML) {
+            out.extend_from_slice(
+                b"<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" ",
+            );
+            out.extend_from_slice(
+                b"\"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">\n",
+            );
+            out.extend_from_slice(b"<html xmlns=\"http://www.w3.org/1999/xhtml\">\n");
+            b" /"
+        } else {
+            out.extend_from_slice(b"<!DOCTYPE html>\n");
+            out.extend_from_slice(b"<html>\n");
+            b""
+        };
+        out.extend_from_slice(b"<head>\n");
+        out.extend_from_slice(b"  <title>");
+        let title = self.params.title.clone().into_bytes();
+        if self.params.flags.intersects(HtmlFlags::SMARTYPANTS) {
+            self.sr.process(out, &title);
+        } else {
+            escape_html(out, &title);
+        }
+        out.extend_from_slice(b"</title>\n");
+        out.extend_from_slice(
+            b"  <meta name=\"GENERATOR\" content=\"Blackfriday Markdown Processor v",
+        );
+        out.extend_from_slice(crate::flags::VERSION.as_bytes());
+        out.extend_from_slice(b"\"");
+        out.extend_from_slice(ending);
+        out.extend_from_slice(b">\n");
+        out.extend_from_slice(b"  <meta charset=\"utf-8\"");
+        out.extend_from_slice(ending);
+        out.extend_from_slice(b">\n");
+        if !self.params.css.is_empty() {
+            out.extend_from_slice(b"  <link rel=\"stylesheet\" type=\"text/css\" href=\"");
+            let css = self.params.css.clone().into_bytes();
+            escape_html(out, &css);
+            out.extend_from_slice(b"\"");
+            out.extend_from_slice(ending);
+            out.extend_from_slice(b">\n");
+        }
+        if !self.params.icon.is_empty() {
+            out.extend_from_slice(b"  <link rel=\"icon\" type=\"image/x-icon\" href=\"");
+            let icon = self.params.icon.clone().into_bytes();
+            escape_html(out, &icon);
+            out.extend_from_slice(b"\"");
+            out.extend_from_slice(ending);
+            out.extend_from_slice(b">\n");
+        }
+        out.extend_from_slice(b"</head>\n");
+        out.extend_from_slice(b"<body>\n\n");
+    }
+
+    /// Builds the table of contents, rewriting heading ids as it goes.
+    ///
+    /// Ported from `writeTOC` (`html.go:908`). Two things about it are worth
+    /// stating, because both look like mistakes and are not:
+    ///
+    /// - It **mutates the tree**, assigning every non-titleblock heading the id
+    ///   `toc_N`. Whatever id the parser derived is discarded. The body pass
+    ///   that follows reads those ids, which is why this cannot be deferred.
+    /// - It sets `last_output_len` to the length of the *buffer*, not of what
+    ///   was written to `out` — so an empty TOC still leaves a non-zero length
+    ///   when the headings rendered nothing.
+    fn write_toc(&mut self, out: &mut Vec<u8>, arena: &mut Arena, ast: NodeId) {
+        let mut buf: Vec<u8> = Vec::new();
+
+        let mut in_heading = false;
+        let mut toc_level: i32 = 0;
+        let mut heading_count: i32 = 0;
+
+        let mut walker = Walker::new(ast);
+        while let Some((node, entering)) = walker.current() {
+            let status = if arena[node].node_type == NodeType::Heading
+                && !arena[node].heading.is_titleblock
+            {
+                in_heading = entering;
+                if entering {
+                    arena.get_mut(node).heading.heading_id = format!("toc_{heading_count}");
+                    let level = arena[node].heading.level;
+                    if level == toc_level {
+                        buf.extend_from_slice(b"</li>\n\n<li>");
+                    } else if level < toc_level {
+                        while level < toc_level {
+                            toc_level -= 1;
+                            buf.extend_from_slice(b"</li>\n</ul>");
+                        }
+                        buf.extend_from_slice(b"</li>\n\n<li>");
+                    } else {
+                        while level > toc_level {
+                            toc_level += 1;
+                            buf.extend_from_slice(b"\n<ul>\n<li>");
+                        }
+                    }
+
+                    buf.extend_from_slice(format!("<a href=\"#toc_{heading_count}\">").as_bytes());
+                    heading_count += 1;
+                } else {
+                    buf.extend_from_slice(b"</a>");
+                }
+                WalkStatus::GoToNext
+            } else if in_heading {
+                self.render_node(&mut buf, arena, node, entering)
+            } else {
+                WalkStatus::GoToNext
+            };
+            walker.advance(arena, status);
+        }
+
+        while toc_level > 0 {
+            toc_level -= 1;
+            buf.extend_from_slice(b"</li>\n</ul>");
+        }
+
+        if !buf.is_empty() {
+            out.extend_from_slice(b"<nav>\n");
+            out.extend_from_slice(&buf);
+            out.extend_from_slice(b"\n\n</nav>\n");
+        }
+        self.last_output_len = buf.len();
+    }
+}
+
+impl Renderer for HtmlRenderer {
+    /// Renders one node, ported from `RenderNode` (`html.go:508`).
+    ///
+    /// Container nodes are visited twice, `entering` first. Upstream's `switch`
+    /// ends in a `default` that panics on an unknown node type; a Rust `match`
+    /// over [`NodeType`] is exhaustive, so that arm has no counterpart here.
+    ///
+    /// Several arms write to `out` directly rather than through the `out`
+    /// helper. That is upstream's choice and it is observable: `last_output_len`
+    /// stays where it was, so a following `cr` behaves as though nothing had
+    /// been written. `Text` and `Code` both do it.
+    fn render_node(
+        &mut self,
+        out: &mut Vec<u8>,
+        arena: &Arena,
+        node: NodeId,
+        entering: bool,
+    ) -> WalkStatus {
+        let mut attrs: Vec<String> = Vec::new();
+        match arena[node].node_type {
+            NodeType::Text => {
+                if self.params.flags.intersects(HtmlFlags::SMARTYPANTS) {
+                    let mut tmp = Vec::new();
+                    escape_html(&mut tmp, &arena[node].literal);
+                    self.sr.process(out, &tmp);
+                } else if arena[node]
+                    .parent()
+                    .is_some_and(|p| arena[p].node_type == NodeType::Link)
+                {
+                    esc_link(out, &arena[node].literal);
+                } else {
+                    escape_html(out, &arena[node].literal);
+                }
+            }
+            NodeType::Softbreak => {
+                self.cr(out);
+                // Upstream's TODO: make this configurable via out(softbreak).
+            }
+            NodeType::Hardbreak => {
+                if !self.params.flags.intersects(HtmlFlags::USE_XHTML) {
+                    self.out(out, b"<br>");
+                } else {
+                    self.out(out, b"<br />");
+                }
+                self.cr(out);
+            }
+            NodeType::Emph => {
+                self.out(out, if entering { b"<em>" } else { b"</em>" });
+            }
+            NodeType::Strong => {
+                let tag: &[u8] = if entering { b"<strong>" } else { b"</strong>" };
+                self.out(out, tag);
+            }
+            NodeType::Del => {
+                self.out(out, if entering { b"<del>" } else { b"</del>" });
+            }
+            NodeType::HTMLSpan => {
+                if !self.params.flags.intersects(HtmlFlags::SKIP_HTML) {
+                    let literal = arena[node].literal.clone();
+                    self.out(out, &literal);
+                }
+            }
+            NodeType::Link => {
+                // Mark an unsafe link but do not link it, and give it no
+                // smartypants treatment either.
+                let dest = arena[node].link.destination.clone();
+                if need_skip_link(self.params.flags, &dest) {
+                    self.out(out, if entering { b"<tt>" } else { b"</tt>" });
+                } else if entering {
+                    let dest = self.add_abs_prefix(&dest);
+                    let mut href_buf: Vec<u8> = b"href=\"".to_vec();
+                    esc_link(&mut href_buf, &dest);
+                    href_buf.push(b'"');
+                    attrs.push(String::from_utf8_lossy(&href_buf).into_owned());
+                    if arena[node].link.note_id != 0 {
+                        // Note this uses the *unprefixed* destination, unlike
+                        // the href just built.
+                        let r = footnote_ref(
+                            &self.params.footnote_anchor_prefix,
+                            &arena[node].link.destination,
+                            arena[node].link.note_id,
+                        );
+                        self.out(out, &r);
+                        return WalkStatus::GoToNext;
+                    }
+                    append_link_attrs(&mut attrs, self.params.flags, &dest);
+                    if arena[node]
+                        .link
+                        .title
+                        .as_ref()
+                        .is_some_and(|t| !t.is_empty())
+                    {
+                        let mut title_buf: Vec<u8> = b"title=\"".to_vec();
+                        escape_html(&mut title_buf, arena[node].link.title.as_ref().unwrap());
+                        title_buf.push(b'"');
+                        attrs.push(String::from_utf8_lossy(&title_buf).into_owned());
+                    }
+                    self.tag(out, b"<a", &attrs);
+                } else if arena[node].link.note_id == 0 {
+                    self.out(out, b"</a>");
+                }
+            }
+            NodeType::Image => {
+                if self.params.flags.intersects(HtmlFlags::SKIP_IMAGES) {
+                    return WalkStatus::SkipChildren;
+                }
+                if entering {
+                    let dest = self.add_abs_prefix(&arena[node].link.destination);
+                    if self.disable_tags == 0 {
+                        // Upstream's `options.safe && potentiallyUnsafe(dest)`
+                        // branch is commented out here, so an image is never
+                        // blanked; only the alt text path below runs.
+                        self.out(out, b"<img src=\"");
+                        esc_link(out, &dest);
+                        self.out(out, b"\" alt=\"");
+                    }
+                    self.disable_tags += 1;
+                } else {
+                    self.disable_tags -= 1;
+                    if self.disable_tags == 0 {
+                        if let Some(title) = arena[node].link.title.clone() {
+                            self.out(out, b"\" title=\"");
+                            escape_html(out, &title);
+                        }
+                        self.out(out, b"\" />");
+                    }
+                }
+            }
+            NodeType::Code => {
+                self.out(out, b"<code>");
+                escape_all_html(out, &arena[node].literal);
+                self.out(out, b"</code>");
+            }
+            NodeType::Document => {}
+            NodeType::Paragraph => {
+                if !skip_paragraph_tags(arena, node) {
+                    if entering {
+                        // Upstream's comment here reads "TODO: untangle this
+                        // clusterfuck about when the newlines need to be added
+                        // and when not." It is reproduced exactly.
+                        if let Some(prev) = arena[node].prev() {
+                            if matches!(
+                                arena[prev].node_type,
+                                NodeType::HTMLBlock
+                                    | NodeType::List
+                                    | NodeType::Paragraph
+                                    | NodeType::Heading
+                                    | NodeType::CodeBlock
+                                    | NodeType::BlockQuote
+                                    | NodeType::HorizontalRule
+                            ) {
+                                self.cr(out);
+                            }
+                        }
+                        if arena[node]
+                            .parent()
+                            .is_some_and(|p| arena[p].node_type == NodeType::BlockQuote)
+                            && arena[node].prev().is_none()
+                        {
+                            self.cr(out);
+                        }
+                        self.out(out, b"<p>");
+                    } else {
+                        self.out(out, b"</p>");
+                        if !(arena[node]
+                            .parent()
+                            .is_some_and(|p| arena[p].node_type == NodeType::Item)
+                            && arena[node].next().is_none())
+                        {
+                            self.cr(out);
+                        }
+                    }
+                }
+            }
+            NodeType::BlockQuote => {
+                if entering {
+                    self.cr(out);
+                    self.out(out, b"<blockquote>");
+                } else {
+                    self.out(out, b"</blockquote>");
+                    self.cr(out);
+                }
+            }
+            NodeType::HTMLBlock => {
+                if !self.params.flags.intersects(HtmlFlags::SKIP_HTML) {
+                    self.cr(out);
+                    let literal = arena[node].literal.clone();
+                    self.out(out, &literal);
+                    self.cr(out);
+                }
+            }
+            NodeType::Heading => {
+                let heading_level = self.params.heading_level_offset + arena[node].heading.level;
+                let (open_tag, close_tag) = heading_tags_from_level(heading_level);
+                if entering {
+                    if arena[node].heading.is_titleblock {
+                        attrs.push("class=\"title\"".to_string());
+                    }
+                    if !arena[node].heading.heading_id.is_empty() {
+                        let mut id =
+                            self.ensure_unique_heading_id(&arena[node].heading.heading_id.clone());
+                        if !self.params.heading_id_prefix.is_empty() {
+                            id = format!("{}{id}", self.params.heading_id_prefix);
+                        }
+                        if !self.params.heading_id_suffix.is_empty() {
+                            id = format!("{id}{}", self.params.heading_id_suffix);
+                        }
+                        attrs.push(format!("id=\"{id}\""));
+                    }
+                    self.cr(out);
+                    self.tag(out, open_tag, &attrs);
+                } else {
+                    self.out(out, close_tag);
+                    if !(arena[node]
+                        .parent()
+                        .is_some_and(|p| arena[p].node_type == NodeType::Item)
+                        && arena[node].next().is_none())
+                    {
+                        self.cr(out);
+                    }
+                }
+            }
+            NodeType::HorizontalRule => {
+                self.cr(out);
+                self.out_hr_tag(out);
+                self.cr(out);
+            }
+            NodeType::List => {
+                let flags = arena[node].list.list_flags;
+                let (open_tag, close_tag): (&[u8], &[u8]) =
+                    if flags.intersects(crate::ListType::DEFINITION) {
+                        (b"<dl>", b"</dl>")
+                    } else if flags.intersects(crate::ListType::ORDERED) {
+                        (b"<ol>", b"</ol>")
+                    } else {
+                        (b"<ul>", b"</ul>")
+                    };
+                if entering {
+                    if arena[node].list.is_footnotes_list {
+                        self.out(out, FOOTNOTES_DIV);
+                        self.out_hr_tag(out);
+                        self.cr(out);
+                    }
+                    self.cr(out);
+                    if let Some(parent) = arena[node].parent() {
+                        if arena[parent].node_type == NodeType::Item
+                            && arena[parent]
+                                .parent()
+                                .is_some_and(|gp| arena[gp].list.tight)
+                        {
+                            self.cr(out);
+                        }
+                    }
+                    self.tag(out, &open_tag[..open_tag.len() - 1], &attrs);
+                    self.cr(out);
+                } else {
+                    self.out(out, close_tag);
+                    // Upstream has two further cr() calls commented out here.
+                    if arena[node]
+                        .parent()
+                        .is_some_and(|p| arena[p].node_type == NodeType::Item)
+                        && arena[node].next().is_some()
+                    {
+                        self.cr(out);
+                    }
+                    if arena[node].parent().is_some_and(|p| {
+                        matches!(
+                            arena[p].node_type,
+                            NodeType::Document | NodeType::BlockQuote
+                        )
+                    }) {
+                        self.cr(out);
+                    }
+                    if arena[node].list.is_footnotes_list {
+                        self.out(out, FOOTNOTES_CLOSE_DIV);
+                    }
+                }
+            }
+            NodeType::Item => {
+                let flags = arena[node].list.list_flags;
+                let (open_tag, close_tag): (&[u8], &[u8]) =
+                    if flags.intersects(crate::ListType::TERM) {
+                        (b"<dt>", b"</dt>")
+                    } else if flags.intersects(crate::ListType::DEFINITION) {
+                        (b"<dd>", b"</dd>")
+                    } else {
+                        (b"<li>", b"</li>")
+                    };
+                if entering {
+                    if item_open_cr(arena, node) {
+                        self.cr(out);
+                    }
+                    if let Some(ref_link) = arena[node].list.ref_link.clone() {
+                        let slug = crate::util::slugify(&ref_link);
+                        let item = footnote_item(&self.params.footnote_anchor_prefix, &slug);
+                        self.out(out, &item);
+                        return WalkStatus::GoToNext;
+                    }
+                    self.out(out, open_tag);
+                } else {
+                    if let Some(ref_link) = arena[node].list.ref_link.clone() {
+                        if self
+                            .params
+                            .flags
+                            .intersects(HtmlFlags::FOOTNOTE_RETURN_LINKS)
+                        {
+                            let slug = crate::util::slugify(&ref_link);
+                            let link = footnote_return_link(
+                                &self.params.footnote_anchor_prefix,
+                                &self.params.footnote_return_link_contents.clone(),
+                                &slug,
+                            );
+                            self.out(out, &link);
+                        }
+                    }
+                    self.out(out, close_tag);
+                    self.cr(out);
+                }
+            }
+            NodeType::CodeBlock => {
+                append_language_attr(&mut attrs, &arena[node].code_block.info);
+                self.cr(out);
+                self.out(out, b"<pre>");
+                self.tag(out, b"<code", &attrs);
+                escape_all_html(out, &arena[node].literal);
+                self.out(out, b"</code>");
+                self.out(out, b"</pre>");
+                if !arena[node]
+                    .parent()
+                    .is_some_and(|p| arena[p].node_type == NodeType::Item)
+                {
+                    self.cr(out);
+                }
+            }
+            NodeType::Table => {
+                if entering {
+                    self.cr(out);
+                    self.out(out, b"<table>");
+                } else {
+                    self.out(out, b"</table>");
+                    self.cr(out);
+                }
+            }
+            NodeType::TableCell => {
+                let is_header = arena[node].table_cell.is_header;
+                let (open_tag, close_tag): (&[u8], &[u8]) = if is_header {
+                    (b"<th", b"</th>")
+                } else {
+                    (b"<td", b"</td>")
+                };
+                if entering {
+                    let align = cell_alignment(arena[node].table_cell.align);
+                    if !align.is_empty() {
+                        attrs.push(format!("align=\"{align}\""));
+                    }
+                    if arena[node].prev().is_none() {
+                        self.cr(out);
+                    }
+                    self.tag(out, open_tag, &attrs);
+                } else {
+                    self.out(out, close_tag);
+                    self.cr(out);
+                }
+            }
+            NodeType::TableHead => {
+                if entering {
+                    self.cr(out);
+                    self.out(out, b"<thead>");
+                } else {
+                    self.out(out, b"</thead>");
+                    self.cr(out);
+                }
+            }
+            NodeType::TableBody => {
+                if entering {
+                    self.cr(out);
+                    self.out(out, b"<tbody>");
+                    // Upstream: "XXX: this is to adhere to a rather silly test.
+                    // Should fix test."
+                    if arena[node].first_child().is_none() {
+                        self.cr(out);
+                    }
+                } else {
+                    self.out(out, b"</tbody>");
+                    self.cr(out);
+                }
+            }
+            NodeType::TableRow => {
+                if entering {
+                    self.cr(out);
+                    self.out(out, b"<tr>");
+                } else {
+                    self.out(out, b"</tr>");
+                    self.cr(out);
+                }
+            }
+        }
+        WalkStatus::GoToNext
+    }
+
+    /// Ported from `RenderHeader` (`html.go:837`).
+    fn render_header(&mut self, out: &mut Vec<u8>, arena: &mut Arena, ast: NodeId) {
+        self.write_document_header(out);
+        if self.params.flags.intersects(HtmlFlags::TOC) {
+            self.write_toc(out, arena, ast);
+        }
+    }
+
+    /// Ported from `RenderFooter` (`html.go:844`).
+    fn render_footer(&mut self, out: &mut Vec<u8>, _arena: &Arena, _ast: NodeId) {
+        if !self.params.flags.intersects(HtmlFlags::COMPLETE_PAGE) {
+            return;
+        }
+        out.extend_from_slice(b"\n</body>\n</html>\n");
     }
 }
 
