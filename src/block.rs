@@ -29,7 +29,7 @@
 #![allow(dead_code)]
 
 use crate::markdown::Markdown;
-use crate::node::{NodeId, NodeType};
+use crate::node::{Arena, NodeId, NodeType};
 use crate::unicode_tables::{is_letter_or_number, simple_to_lower};
 
 /// Advances past a run of `ch` starting at `start`.
@@ -442,6 +442,50 @@ pub fn unescape_string(s: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Splits a finished code block's staging buffer into its info string and body.
+///
+/// Ported from `finalizeCodeBlock` (`block.go:730`). Fenced blocks arrive with
+/// the info string on the first line — [`Markdown::fenced_code_block`] writes it
+/// there — so this splits at the first newline and unescapes the front half.
+/// Indented blocks have no info line and take the buffer verbatim.
+///
+/// # Panics
+///
+/// If a fenced block's content holds no newline. Go indexes with the `-1` that
+/// `bytes.IndexByte` returns and panics identically. Both are unreachable in
+/// practice: the only producer always writes `info` followed by `'\n'`.
+fn finalize_code_block(arena: &mut Arena, block: NodeId) {
+    if arena[block].code_block.is_fenced {
+        let content = std::mem::take(&mut arena[block].content);
+        let newline_pos = content
+            .iter()
+            .position(|&c| c == b'\n')
+            .expect("fenced code block content always begins with an info line");
+        let first_line = &content[..newline_pos];
+        let rest = content[newline_pos + 1..].to_vec();
+
+        // bytes.Trim(firstLine, "\n") strips newlines from both ends. It cannot
+        // do anything here, since first_line stops at the first newline, but it
+        // is kept so the port does not quietly depend on that reasoning.
+        let trimmed: &[u8] = {
+            let mut s = first_line;
+            while let Some((&b'\n', tail)) = s.split_first() {
+                s = tail;
+            }
+            while let Some((&b'\n', head)) = s.split_last() {
+                s = head;
+            }
+            s
+        };
+
+        arena[block].code_block.info = unescape_string(trimmed);
+        arena[block].literal = rest;
+    } else {
+        arena[block].literal = std::mem::take(&mut arena[block].content);
+    }
+    arena[block].content = Vec::new();
+}
+
 /// Length of a blockquote prefix, or `0`.
 ///
 /// Ported from `quotePrefix` (`block.go:943`). A single space after the `>` is
@@ -499,6 +543,116 @@ impl Markdown {
         let container = self.add_child(typ);
         self.arena[container].content = content.to_vec();
         container
+    }
+
+    /// Parses a fenced code block, returning how much input it consumed.
+    ///
+    /// Ported from `fencedCodeBlock` (`block.go:669`). Returns `0` when there is
+    /// no complete fenced block; with `do_render` false it has no side effects,
+    /// which is how the paragraph scanner peeks ahead without committing.
+    ///
+    /// A closing fence is mandatory: running to the end of the buffer without
+    /// one gives `0`, not a block that swallows the remainder.
+    ///
+    /// Note `fence_length` is the length of the whole opening *line*, not the
+    /// marker run — `beg - 1` where `beg` is just past the newline. So
+    /// ```` ```go ```` yields 5, not 3. That is upstream's meaning and the HTML
+    /// renderer never reads it, but it is preserved for any custom renderer
+    /// that does.
+    pub(crate) fn fenced_code_block(&mut self, data: &[u8], do_render: bool) -> usize {
+        let mut info = Vec::new();
+        let (mut beg, marker) = is_fence_line(data, Some(&mut info), b"");
+        if beg == 0 || beg >= data.len() {
+            return 0;
+        }
+        let fence_length = beg - 1;
+
+        let mut work: Vec<u8> = Vec::new();
+        work.extend_from_slice(&info);
+        work.push(b'\n');
+
+        loop {
+            // Safe to assume beg < data.len() here.
+            let (fence_end, _) = is_fence_line(&data[beg..], None, &marker);
+            if fence_end != 0 {
+                beg += fence_end;
+                break;
+            }
+
+            let end = skip_until_char(data, beg, b'\n') + 1;
+
+            // Ran out of input without a closing marker.
+            if end >= data.len() {
+                return 0;
+            }
+
+            if do_render {
+                work.extend_from_slice(&data[beg..end]);
+            }
+            beg = end;
+        }
+
+        if do_render {
+            let block = self.add_block(NodeType::CodeBlock, &work);
+            self.arena[block].code_block.is_fenced = true;
+            self.arena[block].code_block.fence_length = fence_length;
+            finalize_code_block(&mut self.arena, block);
+        }
+
+        beg
+    }
+
+    /// Parses an indented code block, returning how much input it consumed.
+    ///
+    /// Ported from `code` (`block.go:1018`). Blank lines are kept as bare
+    /// newlines and do not end the block; the first non-blank line without an
+    /// indent prefix does.
+    ///
+    /// Trailing newlines are stripped and exactly one is re-appended, so the
+    /// literal always ends with a single newline regardless of how many blank
+    /// lines trailed the source.
+    pub(crate) fn code(&mut self, data: &[u8]) -> usize {
+        let mut work: Vec<u8> = Vec::new();
+
+        let mut i = 0usize;
+        while i < data.len() {
+            let mut beg = i;
+            while i < data.len() && data[i] != b'\n' {
+                i += 1;
+            }
+            if i < data.len() && data[i] == b'\n' {
+                i += 1;
+            }
+
+            let blankline = is_empty(&data[beg..i]) > 0;
+            let pre = code_prefix(&data[beg..i]);
+            if pre > 0 {
+                beg += pre;
+            } else if !blankline {
+                // A non-empty, non-prefixed line ends the block.
+                i = beg;
+                break;
+            }
+
+            if blankline {
+                work.push(b'\n');
+            } else {
+                work.extend_from_slice(&data[beg..i]);
+            }
+        }
+
+        let mut eol = work.len();
+        while eol > 0 && work[eol - 1] == b'\n' {
+            eol -= 1;
+        }
+        work.truncate(eol);
+        work.push(b'\n');
+
+        let block = self.add_block(NodeType::CodeBlock, &work);
+        self.arena[block].code_block.is_fenced = false;
+        finalize_code_block(&mut self.arena, block);
+
+        i
     }
 
     /// Whether `data` begins an ATX heading.
@@ -1076,6 +1230,126 @@ mod tests {
         assert!(!unescape_string(br"\-").is_empty());
         assert_eq!(unescape_string(br"\-"), br"\-", "escape skipped entirely");
         assert_eq!(unescape_string(br"\-&amp;"), b"-&", "same escape, expanded");
+    }
+
+    #[test]
+    fn fenced_code_block_matches_go() {
+        use crate::markdown::Options;
+        let mut n = 0;
+        for f in code_rows("F") {
+            let data = unhex(&f[1]);
+            let ctx = format!("fenced_code_block({:?})", String::from_utf8_lossy(&data));
+
+            // do_render = false, then true: both return values are recorded.
+            let mut p = Markdown::new(Options::none());
+            assert_eq!(
+                p.fenced_code_block(&data, false),
+                f[2].parse::<usize>().unwrap(),
+                "{ctx} [no render]"
+            );
+            let mut p = Markdown::new(Options::none());
+            assert_eq!(
+                p.fenced_code_block(&data, true),
+                f[3].parse::<usize>().unwrap(),
+                "{ctx} [render]"
+            );
+
+            // f[4] is the "|" separator; f[5..] is the rendered node state.
+            let mut p = Markdown::new(Options::none());
+            let ret = p.fenced_code_block(&data, true);
+            assert_eq!(ret, f[5].parse::<usize>().unwrap(), "{ctx} ret");
+            let (lit, info, fenced, flen) = match p.arena()[p.document()].first_child() {
+                Some(c) => (
+                    p.arena()[c].literal.clone(),
+                    p.arena()[c].code_block.info.clone(),
+                    p.arena()[c].code_block.is_fenced,
+                    p.arena()[c].code_block.fence_length,
+                ),
+                None => (Vec::new(), Vec::new(), false, 0),
+            };
+            assert_eq!(lit, unhex(&f[6]), "{ctx} literal");
+            assert_eq!(info, unhex(&f[7]), "{ctx} info");
+            assert_eq!(fenced, f[8] == "true", "{ctx} is_fenced");
+            assert_eq!(flen, f[9].parse::<usize>().unwrap(), "{ctx} fence_length");
+            n += 1;
+        }
+        assert!(n >= 15, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn indented_code_matches_go() {
+        use crate::markdown::Options;
+        let mut n = 0;
+        for f in code_rows("C") {
+            let data = unhex(&f[1]);
+            let mut p = Markdown::new(Options::none());
+            let ret = p.code(&data);
+            let (lit, info) = match p.arena()[p.document()].first_child() {
+                Some(c) => (
+                    p.arena()[c].literal.clone(),
+                    p.arena()[c].code_block.info.clone(),
+                ),
+                None => (Vec::new(), Vec::new()),
+            };
+            let ctx = format!("code({:?})", String::from_utf8_lossy(&data));
+            assert_eq!(ret, f[2].parse::<usize>().unwrap(), "{ctx} ret");
+            assert_eq!(lit, unhex(&f[3]), "{ctx} literal");
+            assert_eq!(info, unhex(&f[4]), "{ctx} info");
+            n += 1;
+        }
+        assert!(n >= 12, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn a_fenced_block_needs_a_closing_fence() {
+        use crate::markdown::Options;
+        let mut p = Markdown::new(Options::none());
+        // Runs to the end of the buffer with no closer: rejected outright
+        // rather than swallowing the rest of the document.
+        assert_eq!(p.fenced_code_block(b"```\nx\n", true), 0);
+        assert_eq!(p.arena()[p.document()].first_child(), None);
+        // A closer with a different marker does not count.
+        let mut p = Markdown::new(Options::none());
+        assert_eq!(p.fenced_code_block(b"```\nx\n~~~\n", true), 0);
+    }
+
+    #[test]
+    fn fence_length_is_the_opening_line_not_the_marker() {
+        use crate::markdown::Options;
+        let mut p = Markdown::new(Options::none());
+        p.fenced_code_block(b"```go\ncode\n```\n", true);
+        let c = p.arena()[p.document()].first_child().unwrap();
+        assert_eq!(p.arena()[c].code_block.fence_length, 5, "len(\"```go\")");
+        assert_eq!(p.arena()[c].code_block.info, b"go");
+        assert_eq!(p.arena()[c].literal, b"code\n");
+    }
+
+    #[test]
+    fn indented_code_keeps_blank_lines_and_collapses_trailing_ones() {
+        use crate::markdown::Options;
+        let lit = |src: &[u8]| {
+            let mut p = Markdown::new(Options::none());
+            p.code(src);
+            let c = p.arena()[p.document()].first_child().unwrap();
+            p.arena()[c].literal.clone()
+        };
+        assert_eq!(lit(b"    a\n    b\n"), b"a\nb\n");
+        // An interior blank line survives as a bare newline.
+        assert_eq!(lit(b"    a\n\n    b\n"), b"a\n\nb\n");
+        // Trailing blanks collapse to exactly one newline.
+        assert_eq!(lit(b"    a\n\n\n"), b"a\n");
+        // Tabs count as an indent too.
+        assert_eq!(lit(b"\ta\n\tb\n"), b"a\nb\n");
+    }
+
+    #[test]
+    fn indented_code_stops_at_the_first_unindented_line() {
+        use crate::markdown::Options;
+        let mut p = Markdown::new(Options::none());
+        let consumed = p.code(b"    a\nplain\n");
+        assert_eq!(consumed, 6, "stops before \"plain\"");
+        let c = p.arena()[p.document()].first_child().unwrap();
+        assert_eq!(p.arena()[c].literal, b"a\n");
     }
 
     #[test]
