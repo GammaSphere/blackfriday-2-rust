@@ -1,0 +1,128 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Emits measured Go
+// answers for unescapeString, fencedCodeBlock and code, and records what the
+// two package-level regexps actually match -- reBackslashOrAmp in particular
+// is not obviously what its name suggests.
+
+func safeFenced(d []byte, doRender bool) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New()
+	return fmt.Sprintf("%d", p.fencedCodeBlock(d, doRender))
+}
+
+// codeResult reports the return value plus the resulting node's Literal and
+// Info, so the generated content is pinned and not just the cursor.
+func codeResult(d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New()
+	n := p.code(d)
+	lit, info := []byte{}, []byte{}
+	if c := p.doc.FirstChild; c != nil {
+		lit = c.Literal
+		info = c.Info
+	}
+	return fmt.Sprintf("%d %s %s", n,
+		hex.EncodeToString(lit), hex.EncodeToString(info))
+}
+
+func fencedResult(d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New()
+	n := p.fencedCodeBlock(d, true)
+	lit, info := []byte{}, []byte{}
+	fenced, fenceLen := false, 0
+	if c := p.doc.FirstChild; c != nil {
+		lit = c.Literal
+		info = c.Info
+		fenced = c.IsFenced
+		fenceLen = c.FenceLength
+	}
+	return fmt.Sprintf("%d %s %s %v %d", n,
+		hex.EncodeToString(lit), hex.EncodeToString(info), fenced, fenceLen)
+}
+
+func TestZZGenCode(t *testing.T) {
+	f, err := os.Create("code-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	// What the regexps really are, and really match.
+	fmt.Fprintf(f, "# reBackslashOrAmp=%s\n", reBackslashOrAmp.String())
+	fmt.Fprintf(f, "# reEntityOrEscapedChar=%s\n", reEntityOrEscapedChar.String())
+	for _, s := range [][]byte{
+		{'\\'}, {'&'}, {'\\', '#'}, {'a'}, {'\\', '\\'}, {'x', '&', 'y'},
+	} {
+		fmt.Fprintf(f, "M %s %v\n", hex.EncodeToString(s), reBackslashOrAmp.Match(s))
+	}
+
+	// unescapeString over inputs that exercise both alternatives.
+	unesc := [][]byte{
+		{}, []byte("plain"),
+		{'\\', '#'}, {'\\', '-'}, {'\\', '\\'}, {'\\', 'z'}, {'\\'},
+		[]byte("&amp;"), []byte("&#38;"), []byte("&#x26;"), []byte("&#X26;"),
+		[]byte("&AMP;"), []byte("&notreal;"), []byte("&"), []byte("&;"),
+		{'\\', '&', 'a', 'm', 'p', ';'},
+		{'a', '\\', '-', 'b', '&', 'a', 'm', 'p', ';', 'c'},
+		[]byte("go"), []byte("c++"), []byte("&lt;go&gt;"),
+		{'\\', '!', '\\', '"', '\\', '#'},
+		{0xff, '&', 'a', 'm', 'p', ';'},
+	}
+	for _, s := range unesc {
+		fmt.Fprintf(f, "U %s %s\n", hex.EncodeToString(s),
+			hex.EncodeToString(unescapeString(s)))
+	}
+
+	// fencedCodeBlock, with and without rendering.
+	fenced := [][]byte{
+		[]byte(""), []byte("```\n```\n"), []byte("```\ncode\n```\n"),
+		[]byte("```go\ncode\n```\n"), []byte("``` go \nx\n```\n"),
+		[]byte("~~~\nx\n~~~\n"), []byte("```\nx\n~~~\n"), []byte("```\nx\n"),
+		[]byte("```\n"), []byte("```"), []byte("not a fence\n"),
+		[]byte("````\nx\n````\n"), []byte("```\nx\n````\n"),
+		[]byte("   ```\nx\n   ```\n"),
+		[]byte("```{go}\nx\n```\n"),
+		{'`', '`', '`', '\\', '#', '\n', 'x', '\n', '`', '`', '`', '\n'},
+		[]byte("```&amp;\nx\n```\n"),
+		[]byte("```\n\n```\n"),
+		[]byte("```go\nline1\nline2\n```\ntrailing"),
+	}
+	for _, d := range fenced {
+		fmt.Fprintf(f, "F %s %s %s | %s\n", hex.EncodeToString(d),
+			safeFenced(d, false), safeFenced(d, true), fencedResult(d))
+	}
+
+	// indented code
+	codes := [][]byte{
+		[]byte(""), []byte("    x\n"), []byte("\tx\n"),
+		[]byte("    a\n    b\n"), []byte("    a\n\n    b\n"),
+		[]byte("    a\nplain\n"), []byte("plain\n"),
+		[]byte("    a\n\n\n"), []byte("\ta\n\tb\n"),
+		[]byte("    a"), []byte("     a\n"), []byte("   a\n"),
+		[]byte("    \n    x\n"), []byte("    x\n    \n    y\n"),
+	}
+	for _, d := range codes {
+		fmt.Fprintf(f, "C %s %s\n", hex.EncodeToString(d), codeResult(d))
+	}
+}

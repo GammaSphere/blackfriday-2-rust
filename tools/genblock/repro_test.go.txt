@@ -1,0 +1,54 @@
+package blackfriday
+
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Minimal reproducer for the reBackslashOrAmp bug, through the PUBLIC Run API.
+//
+// block.go:30 declares
+//
+//	reBackslashOrAmp = regexp.MustCompile("[\\&]")
+//
+// whose pattern is [\&]. In RE2 a backslash inside a character class escapes
+// the next byte, so that class contains only '&' -- not backslash, despite the
+// variable's name. The author evidently meant "[\\\\&]" (pattern [\\&]).
+//
+// unescapeString uses it as a fast-path guard:
+//
+//	if reBackslashOrAmp.Match(str) {
+//		return reEntityOrEscapedChar.ReplaceAllFunc(str, unescapeChar)
+//	}
+//	return str
+//
+// so a string containing a backslash escape but no ampersand skips the
+// replacement entirely, even though reEntityOrEscapedChar is built to handle
+// exactly that case.
+//
+// The observable consequence: an identical escape sequence in a fenced code
+// block's info string is unescaped or not depending on whether an unrelated
+// '&' happens to appear elsewhere in the same info string.
+func TestZZReproBackslashOrAmp(t *testing.T) {
+	f, _ := os.Create("repro.txt")
+	defer f.Close()
+
+	out := func(label, md string) {
+		got := Run([]byte(md), WithExtensions(FencedCode))
+		fmt.Fprintf(f, "%s\ninput:  %q\noutput: %s\n\n", label, md, got)
+	}
+
+	// Same escape, two contexts. Only the second gets unescaped.
+	out("A: backslash escape alone", "```\\-go\ncode\n```\n")
+	out("B: same escape, plus an unrelated &", "```\\-go&amp;x\ncode\n```\n")
+
+	fmt.Fprintf(f, "direct unescapeString calls:\n")
+	for _, s := range []string{`\-go`, `\-go&amp;x`, `\#`, `\#&`} {
+		fmt.Fprintf(f, "  unescapeString(%-12q) = %q\n", s, unescapeString([]byte(s)))
+	}
+	fmt.Fprintf(f, "\nreBackslashOrAmp pattern = %q\n", reBackslashOrAmp.String())
+	for _, s := range []string{`\`, `&`, `\#`} {
+		fmt.Fprintf(f, "  Match(%-4q) = %v\n", s, reBackslashOrAmp.MatchString(s))
+	}
+}

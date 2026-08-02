@@ -321,6 +321,127 @@ pub(crate) fn is_fence_line(
     (i + 1, marker) // Take the newline into account.
 }
 
+/// The character class upstream calls `escapable` (`block.go:26`).
+///
+/// The pattern is `[!"#$%&'()*+,./:;<=>?@[\\\]^_`{|}~-]`, which turns out to be
+/// exactly the 32 ASCII punctuation characters — the same set as
+/// [`crate::util::is_punct`]. A test asserts that equivalence rather than
+/// trusting it.
+#[inline]
+fn is_escapable(c: u8) -> bool {
+    crate::util::is_punct(c)
+}
+
+/// Matches upstream's `charEntity` at `data[i..]`, returning its length.
+///
+/// The pattern is `&(?:#x[a-f0-9]{1,8}|#[0-9]{1,8}|[a-z][a-z0-9]{1,31});` under
+/// `(?i)`, so the hex digits and the name are both case-insensitive.
+fn char_entity_len(data: &[u8], i: usize) -> Option<usize> {
+    if data.get(i) != Some(&b'&') {
+        return None;
+    }
+    let mut j = i + 1;
+
+    let count = if data.get(j) == Some(&b'#') {
+        j += 1;
+        if matches!(data.get(j), Some(&b'x') | Some(&b'X')) {
+            j += 1;
+            let start = j;
+            while j < data.len() && j - start < 8 && data[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            j - start
+        } else {
+            let start = j;
+            while j < data.len() && j - start < 8 && data[j].is_ascii_digit() {
+                j += 1;
+            }
+            j - start
+        }
+    } else {
+        // [a-z][a-z0-9]{1,31}: at least two characters total.
+        if !data.get(j).is_some_and(u8::is_ascii_alphabetic) {
+            return None;
+        }
+        j += 1;
+        let start = j;
+        while j < data.len() && j - start < 31 && data[j].is_ascii_alphanumeric() {
+            j += 1;
+        }
+        if j - start < 1 {
+            return None;
+        }
+        j - start
+    };
+
+    if count == 0 {
+        return None;
+    }
+    if data.get(j) != Some(&b';') {
+        return None;
+    }
+    Some(j + 1 - i)
+}
+
+/// Expands one match of `reEntityOrEscapedChar`.
+///
+/// Ported from `unescapeChar` (`block.go:716`).
+fn unescape_char(s: &[u8]) -> Vec<u8> {
+    if s[0] == b'\\' {
+        return vec![s[1]];
+    }
+    crate::unescape::unescape_string(s)
+}
+
+/// Expands backslash escapes and character entities.
+///
+/// Ported from `unescapeString` (`block.go:723`). **This reproduces an upstream
+/// bug on purpose**; see `BUGS.md`.
+///
+/// Upstream guards the work with `reBackslashOrAmp`, declared as
+/// `regexp.MustCompile("[\\&]")`. That pattern is `[\&]`, and inside an RE2
+/// character class a backslash escapes the next byte — so the class contains
+/// only `&`, never a backslash, despite the name. A string holding a backslash
+/// escape but no ampersand therefore skips the replacement entirely:
+///
+/// ```
+/// # use blackfriday::block::unescape_string;
+/// // The escape is left alone...
+/// assert_eq!(unescape_string(br"\-go"), br"\-go");
+/// // ...but the same escape is expanded when an unrelated & appears.
+/// assert_eq!(unescape_string(br"\-go&amp;x"), b"-go&x");
+/// ```
+///
+/// Fixing it here would be a divergence, so the guard is written to match the
+/// class upstream actually compiled.
+pub fn unescape_string(s: &[u8]) -> Vec<u8> {
+    // reBackslashOrAmp: the class is `&` only. Writing `|| c == b'\\'` here
+    // would "fix" the bug and break equivalence.
+    if !s.contains(&b'&') {
+        return s.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < s.len() {
+        // reEntityOrEscapedChar, first alternative: \\ followed by escapable.
+        if s[i] == b'\\' && i + 1 < s.len() && is_escapable(s[i + 1]) {
+            out.extend_from_slice(&unescape_char(&s[i..i + 2]));
+            i += 2;
+            continue;
+        }
+        // Second alternative: a character entity.
+        if let Some(len) = char_entity_len(s, i) {
+            out.extend_from_slice(&unescape_char(&s[i..i + len]));
+            i += len;
+            continue;
+        }
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Length of a blockquote prefix, or `0`.
 ///
 /// Ported from `quotePrefix` (`block.go:943`). A single space after the `>` is
@@ -908,6 +1029,86 @@ mod tests {
             n += 1;
         }
         assert!(n >= 100, "thin corpus: {n}");
+    }
+
+    /// Measured Go answers for `unescapeString` and the regexp guard.
+    const CODE_FIXTURE: &str = include_str!("../tests/fixtures/go-code.txt");
+
+    fn code_rows(tag: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+        CODE_FIXTURE.lines().filter_map(move |l| {
+            let f: Vec<String> = l.split(' ').map(str::to_string).collect();
+            (f.first().map(String::as_str) == Some(tag)).then_some(f)
+        })
+    }
+
+    #[test]
+    fn unescape_string_matches_go_including_the_backslash_bug() {
+        let mut n = 0;
+        for f in code_rows("U") {
+            let input = unhex(&f[1]);
+            let want = unhex(f.get(2).map(String::as_str).unwrap_or(""));
+            assert_eq!(
+                unescape_string(&input),
+                want,
+                "unescape_string({:?})",
+                String::from_utf8_lossy(&input)
+            );
+            n += 1;
+        }
+        assert!(n >= 18, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn the_re_backslash_or_amp_guard_ignores_backslashes() {
+        // See BUGS.md #1. The fixture records what Go's regexp really matches.
+        for f in code_rows("M") {
+            let input = unhex(&f[1]);
+            let go_matched = f[2] == "true";
+            let port_matched = input.contains(&b'&');
+            assert_eq!(
+                port_matched,
+                go_matched,
+                "reBackslashOrAmp.Match({:?})",
+                String::from_utf8_lossy(&input)
+            );
+        }
+        // Spelled out, because this is the bug rather than an accident:
+        assert!(!unescape_string(br"\-").is_empty());
+        assert_eq!(unescape_string(br"\-"), br"\-", "escape skipped entirely");
+        assert_eq!(unescape_string(br"\-&amp;"), b"-&", "same escape, expanded");
+    }
+
+    #[test]
+    fn escapable_is_exactly_the_ascii_punctuation_set() {
+        // Upstream spells the class out; this asserts it equals is_punct rather
+        // than assuming it.
+        let listed = br##"!"#$%&'()*+,./:;<=>?@[\]^_`{|}~-"##;
+        for c in 0u8..=255 {
+            assert_eq!(is_escapable(c), listed.contains(&c), "byte {c:#04x}");
+            assert_eq!(is_escapable(c), crate::util::is_punct(c), "byte {c:#04x}");
+        }
+    }
+
+    #[test]
+    fn char_entity_shapes_match_the_pattern() {
+        // &(?:#x[a-f0-9]{1,8}|#[0-9]{1,8}|[a-z][a-z0-9]{1,31}); under (?i)
+        assert_eq!(char_entity_len(b"&amp;", 0), Some(5));
+        assert_eq!(char_entity_len(b"&AMP;", 0), Some(5), "case-insensitive");
+        assert_eq!(char_entity_len(b"&#38;", 0), Some(5));
+        assert_eq!(char_entity_len(b"&#x26;", 0), Some(6));
+        assert_eq!(char_entity_len(b"&#X26;", 0), Some(6));
+        // A name needs at least two characters.
+        assert_eq!(char_entity_len(b"&a;", 0), None);
+        assert_eq!(char_entity_len(b"&ab;", 0), Some(4));
+        // Digits cannot start a name.
+        assert_eq!(char_entity_len(b"&1a;", 0), None);
+        // The semicolon is mandatory.
+        assert_eq!(char_entity_len(b"&amp", 0), None);
+        assert_eq!(char_entity_len(b"&;", 0), None);
+        assert_eq!(char_entity_len(b"&#;", 0), None);
+        // Numeric references cap at eight digits.
+        assert_eq!(char_entity_len(b"&#123456789;", 0), None);
+        assert_eq!(char_entity_len(b"&#12345678;", 0), Some(11));
     }
 
     #[test]
