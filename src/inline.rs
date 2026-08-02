@@ -1052,29 +1052,32 @@ fn link(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>)
 
             link_dest = r.link.clone();
             title = Some(r.title.clone());
-            p.notes.push(r);
+            // An inline footnote is a fresh reference every time, so nothing
+            // else can be holding it -- unlike the deferred case below.
+            p.notes.push(std::rc::Rc::new(std::cell::RefCell::new(r)));
         } else {
             let key = String::from_utf8_lossy(&id).into_owned();
-            let Some((mut lr, from_table)) = p.get_ref_owned(&key) else {
+            let Some(handle) = p.get_ref_handle(&key) else {
                 return (0, None);
             };
 
             if t == LinkType::DeferredFootnote {
+                // Writing through the handle is writing into p.refs, and into
+                // every queue entry that already holds it. Referencing one id
+                // twice therefore leaves both entries pointing at the second
+                // Item node, which is what makes upstream emit a single <li>
+                // with its body repeated rather than two <li>s.
+                let mut lr = handle.borrow_mut();
                 lr.note_id = p.notes.len() as i32 + 1;
                 lr.footnote = Some(fnode);
-                p.notes.push(lr.clone());
-                // Go held a pointer into p.refs, so this assignment is visible
-                // to every later lookup of the same id. A reference the
-                // override callback invented is freshly built each call and
-                // has nowhere to be written back to.
-                if from_table {
-                    p.put_ref(&key, lr.clone());
-                }
+                drop(lr);
+                p.notes.push(std::rc::Rc::clone(&handle));
             }
 
-            link_dest = lr.link;
+            let lr = handle.borrow();
+            link_dest = lr.link.clone();
             // For a footnote the title holds the note's contents.
-            title = Some(lr.title);
+            title = Some(lr.title.clone());
             note_id = lr.note_id;
         }
 
@@ -1106,8 +1109,7 @@ fn link(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>)
                 // Links cannot nest, so turn link parsing off and recurse.
                 let inside_link = p.inside_link;
                 p.inside_link = true;
-                let inner = data[1..txt_e].to_vec();
-                p.inline(node, &inner);
+                p.inline(node, &data[1..txt_e]);
                 p.inside_link = inside_link;
             }
             node
@@ -1116,8 +1118,7 @@ fn link(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>)
             let node = bare_node(p, NodeType::Image);
             p.arena.get_mut(node).link.destination = u_link;
             p.arena.get_mut(node).link.title = title;
-            let alt = data[1..txt_e].to_vec();
-            let t = text_node(p, &alt);
+            let t = text_node(p, &data[1..txt_e]);
             p.arena.append_child(node, t);
             i += 1;
             node
@@ -1413,8 +1414,7 @@ fn helper_emphasis(p: &mut Markdown, data: &[u8], c: u8) -> (usize, Option<NodeI
             }
 
             let emph = bare_node(p, NodeType::Emph);
-            let inner = data[..i].to_vec();
-            p.inline(emph, &inner);
+            p.inline(emph, &data[..i]);
             return (i + 1, Some(emph));
         }
     }
@@ -1443,8 +1443,7 @@ fn helper_double_emphasis(p: &mut Markdown, data: &[u8], c: u8) -> (usize, Optio
                 NodeType::Strong
             };
             let node = bare_node(p, node_type);
-            let inner = data[..i].to_vec();
-            p.inline(node, &inner);
+            p.inline(node, &data[..i]);
             return (i + 2, Some(node));
         }
         i += 1;
@@ -1481,8 +1480,7 @@ fn helper_triple_emphasis(
             let strong = bare_node(p, NodeType::Strong);
             let em = bare_node(p, NodeType::Emph);
             p.arena.append_child(strong, em);
-            let inner = data[..i].to_vec();
-            p.inline(em, &inner);
+            p.inline(em, &data[..i]);
             return (i + 3, Some(strong));
         } else if i + 1 < data.len() && data[i + 1] == c {
             // Two found; hand back to single emphasis.

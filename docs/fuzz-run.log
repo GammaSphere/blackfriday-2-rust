@@ -1,0 +1,67 @@
+[2026-08-02T22:35:53Z] bf-fuzz starting: duration=3m0s seed=20260803 limit=2s corpus=23 files
+[2026-08-02T22:35:53Z] go side:   github.com/russross/blackfriday/v2 v2.1.0 (unpatched), via E:\projects\raptors-v2\fuzz\goserve.exe
+[2026-08-02T22:35:53Z] rust side: the port, via E:\projects\raptors-v2\target\release\bf-serve.exe
+[2026-08-02T22:35:59Z] HANG on both sides config=footnotes
+  input: ";+ <script><a@b.c>&|a|b|\t  \n___<div>[^1]: note## \r\n[^1]: note|a|b||a|b|<div><http://x.com>``[^1]: note--## ___'<b>ftp://q\n\n chttps://y.z/a(b)</script>&% t"
+[2026-08-02T22:36:05Z] HANG on both sides config=footnotes
+  input: "  \n+ + ####### __f__[t](u)<![CDATA[x]]>😀# -->\n\n\n>> [^1](r)    <http://x.com>😀[t]1/2**b**--</b>term* ###### \t&notanentity;&[^1]_e_\x00#\r\n[^1]: notetext with wordséèê\x00[^1]"
+[2026-08-02T22:36:12Z] HANG on both sides config=all
+  input: ";![a][r]<![CDATA[x]]></script><http://x.com>+ \\...**b**<!--``* <!--mailto:a@b.c%%title\"</script>[^1]&---<http://x.com>    \\ c^[inline]<![CDATA[x]]>\x00> \n\\*\n\n[^1]: note%%title;|---|---|- [^1]&#x26;"
+[2026-08-02T22:36:12Z] progress: 61449 inputs, 0 divergences, 3 shared hangs, 3321 inputs/s
+[2026-08-02T22:36:21Z] HANG on both sides config=footnotes
+  input: "\\\n\r\n[^1]: note<div>ftp://q'&mailto:a@b.ctext with words**b*** ``...q''[^1]* [r]: http://x \"ti\"éèê  \n\n\nhttp://x.com[t]&'% &t\t\\*<script>(r)+ 10) <script>__f__mailto:a@b.c[^1]"
+[2026-08-02T22:36:27Z] progress: 173679 inputs, 0 divergences, 4 shared hangs, 5184 inputs/s
+[2026-08-02T22:36:32Z] HANG on both sides config=footnotes
+  input: "[^1]: note---\" c😀    [^1]10) ~~~\t> 1.  c\na**b**<?php ?>&amp;1. <?php ?>``|a|b|~~~<!--text with words-->b [r]: http://x \"ti\"&#38;[^1]***- éèê"
+[2026-08-02T22:36:42Z] progress: 289659 inputs, 0 divergences, 5 shared hangs, 5972 inputs/s
+[2026-08-02T22:36:48Z] HANG on both sides config=footnotes
+  input: "`[^1]<!--___1. -----<!--^[inline]1. &notanentity;\n[^1]: @otea3/4[^1]1/2[t](u)[t](u)1"
+[2026-08-02T22:37:01Z] HANG on both sides config=footnotes
+  input: "[^1]: note*a*[t](u)10) b [^1]ftp://q  \n</script>[^1]: note<!--term\r\n__f__"
+[2026-08-02T22:37:01Z] progress: 403659 inputs, 0 divergences, 7 shared hangs, 6009 inputs/s
+[2026-08-02T22:37:06Z] HANG on both sides config=all
+  input: "[^1]%%title'1/2**b**\\\n***😀***=====<div>\n[^1]: note![a](i)>> ~~~%%title&amp;http://x.com<!--[t][r][^1]---\t[^1]\\*<script># '__f__=====éèê\"[t][r]![a][r]=====text with words&#38;\x7f"
+[2026-08-02T22:37:13Z] HANG on both sides config=all
+  input: "![a][r]\\😀text with words***\r\n[^1]: note###### \x7fterm[^1]: note&#x26;1. [r]: http://x \"ti\"\n\n-----[^1]: note😀http://x.com</div>a\\% t_e_"
+[2026-08-02T22:37:16Z] progress: 464273 inputs, 0 divergences, 9 shared hangs, 5650 inputs/s
+[2026-08-02T22:37:20Z] HANG on both sides config=footnotes
+  input: "mailto:a@b.c\\*éèê\"[^1]: note\r\n\x00https://y.z/a(b)[r]: http://x \"ti\"___[r]: http://x \"ti\"|a|b|\\*-----&#x26;^[inline]```go\x7f&  \n[^1]: note😀-->+ <![CDATA[x]]><div>[^1]![a][r]<div>[r]: http://x \"ti\"'***c***"
+[2026-08-02T22:37:25Z] HANG on both sides config=all
+  input: "\r\n[^1]: note    indented code-->- <!--|:-:|--:|&\x00</script>term\\[^1]: note[^1]\x7f_e_mailto:a@b.c*a*ftp://q[t][r]term    indented code[t](u)text with words  \n[^1]text with words"
+[2026-08-02T22:37:31Z] HANG on both sides config=footnotes
+  input: "[r]: http://x \"ti\"&#x26;```\"<script>\\<b>[^1]: note3/4% t=====1/2![a][r]b _e_(r)<script># \r\n[^1]: note[t][r]~~d~~~~~. . .(r)[t](u)[t]\x00[^1]10) \x00"
+[2026-08-02T22:37:31Z] progress: 489466 inputs, 0 divergences, 12 shared hangs, 5021 inputs/s
+[2026-08-02T22:37:36Z] HANG on both sides config=footnotes
+  input: "<?php ?><?php ?>% t</div>mailto:a@b.c\n[t][]a[^1]a10) </script>^[inline]<!DOCTYPE h>b \n\n*a*\\\n[^1]: note\x7f&amp;[^1]^[inline]<a@b.c>|a|b|--1/2ahttp://x.com\x7f\\\n: def<a@b.c>"
+[2026-08-02T22:37:42Z] HANG on both sides config=footnotes
+  input: "<?php ?>ftp://q%%title% t[^1]: note^[inline]    - -->[^1][t][]......&#38;;|a|b|* ~~~\\\n[r]: http://x \"ti\"<b>%%title'|---|---|-->a`\\\n[^1]: def</script>[^1]- =====~~~&notanentity;"
+[2026-08-02T22:37:46Z] progress: 550409 inputs, 0 divergences, 14 shared hangs, 4894 inputs/s
+[2026-08-02T22:37:53Z] HANG on both sides config=footnotes
+  input: "[^1]: note[^1]: note;term![a](i)+ text with words10) \n\n[^1]</b>b "
+[2026-08-02T22:38:01Z] HANG on both sides config=all
+  input: ". . .* [^1]a</b>\x7f# <a@b.c>- >> \n</div>![a][r]+ #######     indented code\n[^1]: note......</div>## ###### >> <?php ?> cmailto:a@b.c[^1]: note*a*---[t]"
+[2026-08-02T22:38:01Z] progress: 629499 inputs, 0 divergences, 16 shared hangs, 4933 inputs/s
+[2026-08-02T22:38:10Z] HANG on both sides config=footnotes
+  input: "  \n\r\n[^1]: note1/2[^1]\r\n\x00terma[t][]1/2*** cterm[^1]# 1. 1. <![CDATA[x]]>😀#![a][r](c)\\;***c***^[inline]\n\n-----[t](u)term\\"
+[2026-08-02T22:38:15Z] HANG on both sides config=all
+  input: "[^1]: note|:-:|--:|[^1]https://y.z/a(b)---___[^1]\n\n**b**![a](i)[^1]: note+ &#x26;<a@b.c>&amp;&amp;b [t]``q''***- [^1]: note\n. . .<!DOCTYPE h>\r\n~~~. . .<![CDATA[x]]></b>(c)![a](i)&(r)--[t][]\"~~~"
+[2026-08-02T22:38:20Z] HANG on both sides config=all
+  input: "####### |a|b|[t][r]😀[r]: http://x \"ti\"text with words# [^1]: note![a](i)*a*``>   \n% t<!DOCTYPE h>-----> ***c***(r)\t\n\n[^1]: note+ ![a][r][^1];</script>"
+[2026-08-02T22:38:20Z] progress: 689239 inputs, 0 divergences, 19 shared hangs, 4712 inputs/s
+[2026-08-02T22:38:27Z] HANG on both sides config=footnotes
+  input: "####### `\n\n[^1]% t<http://x.com>😀``####### - \n[^1]: note(r)~~~&#x26;<![CDATA[x]]>---[^1]: no"
+[2026-08-02T22:38:35Z] HANG on both sides config=all
+  input: "---[t](u)&<b>```go[^1]\r\n---(r)  \n[^1]: notea[^1]: note<!-- c -->*a*=====<!DOCTYPE h>>> "
+[2026-08-02T22:38:35Z] progress: 758142 inputs, 0 divergences, 21 shared hangs, 4699 inputs/s
+[2026-08-02T22:38:41Z] HANG on both sides config=all
+  input: "[^1]: note-----\x00&notanentity;|---|---|1. --->> * <div>---[^1]a<script></b>%%title===1. ==+ ftp://q>>   \néèê[^1]## </b>"
+[2026-08-02T22:38:47Z] HANG on both sides config=footnotes
+  input: "*a*[^1]: note\n[^1]: note``</div>...text with words![a](i)**b**<!DOCTYPE h>**b*****###### [t](u)</b>![a](i)%%title[^1]  \n\x00## <!DOCTYPE h>\r\n\r\n[t](u)"
+[2026-08-02T22:38:52Z] HANG on both sides config=footnotes
+  input: "&![a](i)'***c***--~~d~~=====**b**###### -----``\x00<http://x.com>> > </script>\n. . .&notanentity;# \\\n[^1]: note> [^1]\n**b**[^1]: note. . .<?php ?>-------b > [t](u)__f__`<b>"
+[2026-08-02T22:38:52Z] progress: 794277 inputs, 0 divergences, 24 shared hangs, 4458 inputs/s
+[2026-08-02T22:38:57Z] HANG on both sides config=footnotes
+  input: "[^1]: note<![CDATA[x]]>[^1]<![CDATA[x]]>---% t(c)'  \n[t][]10) 3/4*a*&notanentity;&notanentity;###### [^1]: noteéèê</script>mailto:a@b.c`"
+[2026-08-02T22:38:57Z] finished: 804261 inputs in 3m3.636s (4380/s) across 10 configurations
+[2026-08-02T22:38:57Z] shared hangs: 25 (both implementations, see BUGS.md #4 and #5)
+[2026-08-02T22:38:57Z] RESULT: 0 divergences

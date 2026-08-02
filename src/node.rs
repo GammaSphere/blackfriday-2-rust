@@ -442,6 +442,17 @@ impl Arena {
         }
     }
 
+    /// Reserves room for at least `additional` more nodes.
+    ///
+    /// Go allocates each node separately, so it never pays a growth cost; the
+    /// arena trades that for locality and pays it in one lump when the backing
+    /// `Vec` doubles. `Node` is a wide struct, so that lump is a large memcpy
+    /// landing in the middle of a parse — visible as a worse p99 than Go's
+    /// before the parser started reserving up front.
+    pub fn reserve(&mut self, additional: usize) {
+        self.nodes.reserve(additional);
+    }
+
     /// Allocates a node, mirroring Go's `NewNode`.
     ///
     /// The node starts detached and open.

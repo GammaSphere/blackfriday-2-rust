@@ -262,3 +262,170 @@ caller can depend on: the extra byte is zero only because Go zeroes fresh
 allocations, and the panic threshold tracks size classes rather than anything in
 the input. Pinned by `unterminated_tag_writes_only_what_it_was_given`, and
 recorded again in `PARITY.md`.
+
+---
+
+## 4. A footnote cycle makes `Run` loop forever
+
+**Severity:** high — an unbounded loop with unbounded allocation, reachable
+from the public API with a documented extension and a 24-byte document.
+**Status:** confirmed, minimal reproducer through the public API.
+**Location:** `markdown.go:421`, `parseRefsToAST`.
+
+### The defect
+
+```go
+// Note: this loop is intentionally explicit, not range-form. This is
+// because the body of the loop will append nested footnotes to p.notes and
+// we need to process those late additions. Range form would only walk over
+// the fixed initial set.
+for i := 0; i < len(p.notes); i++ {
+	ref := p.notes[i]
+	...
+	p.inline(block, ref.title)
+}
+```
+
+The comment is right about what the loop is for, and that is exactly the
+problem: the bound is re-read every pass, and the body can grow what it is
+bounded by. Parsing a footnote's body calls `inline`, which calls `link`, which
+for a deferred footnote does
+
+```go
+lr, ok := p.getRef(string(id))
+if t == linkDeferredFootnote {
+	lr.noteID = len(p.notes) + 1
+	lr.footnote = footnoteNode
+	p.notes = append(p.notes, lr)
+}
+```
+
+There is no check for whether this id has already been queued. A footnote whose
+body references a footnote already in the queue appends another entry, that
+entry's body is parsed on the next pass, and it appends another. `len(p.notes)`
+grows by one for every iteration that consumes one.
+
+A *chain* terminates — `[^1]: see [^2]` with `[^2]: plain` is fine, and
+`TestNestedFootnotes` covers it. A **cycle** does not.
+
+### Reproducer (public API)
+
+```go
+blackfriday.Run(
+	[]byte("[^1]\n\n[^1]: note [^1]\n"),
+	blackfriday.WithExtensions(blackfriday.CommonExtensions|blackfriday.Footnotes),
+)
+```
+
+Twenty-four bytes. Measured: no return within the timeout, at any timeout
+tried. Each pass also appends a `reference` and allocates an `Item` node, so
+memory grows without bound alongside the loop — the process does not merely
+spin, it climbs until it is killed.
+
+`[^1]: note [^1]` on its own does **not** hang: a footnote only enters
+`p.notes` when something references it, so the definition has to be reachable
+from the document body for the cycle to start.
+
+### Impact
+
+Any service that renders user-supplied Markdown with `Footnotes` enabled can be
+wedged by a comment. No unusual configuration is needed beyond the extension
+itself, which is one of blackfriday's headline features. This is the most
+serious of the four defects here: the other three corrupt a document, this one
+takes the process down.
+
+### In this port
+
+**Reproduced.** `src/markdown.rs::parse_refs_to_ast` has the same indexed loop
+with the same growing bound, because the alternative is diverging from upstream
+on a documented behaviour — the comment above is explicit that late additions
+are meant to be processed. Verified by running the reproducer against
+`examples/render.rs` directly: it does not terminate, exactly as Go does not.
+
+It is not pinned by a test, for the obvious reason that a test which never
+returns is not a test. `fuzz/main.go` skips this input family instead, with the
+filter documented at `hasFootnoteInFootnote`, so that the differential fuzzer
+keeps finding things that are not this.
+
+---
+
+## 5. Eight bytes wedge `Run` with the default options
+
+**Severity:** high — an infinite loop reachable from `Run(input)` with **no
+options at all**, on eight bytes of input.
+**Status:** confirmed, minimal reproducer through the public API.
+**Location:** `block.go:696`, in `paragraph`.
+
+### The defect
+
+```go
+// did we find a blank line marking the end of the paragraph?
+if n := p.isEmpty(current); n > 0 {
+	// did this blank line followed by a definition list item?
+	if p.extensions&DefinitionLists != 0 {
+		if i < len(data)-1 && data[i+1] == ':' {
+			return p.list(data[prev:], ListTypeDefinition)
+		}
+	}
+	...
+```
+
+`paragraph` returns the number of bytes it consumed **from `data`**, and every
+other `return` in it does. This one returns what `p.list` consumed from
+`data[prev:]` — a different origin. Two things follow, and the second is fatal:
+
+1. The count is short by `prev`, so the caller resumes in the middle of what
+   was already parsed.
+2. `p.list` returns `0` when its first `listItem` consumes nothing. `paragraph`
+   then returns `0`, and `block`'s loop does `data = data[0:]` and calls
+   `paragraph` again on the identical slice, forever.
+
+The same handoff appears a second time at `block.go:748`, for a definition list
+item that follows a term rather than a blank line, with the same shape.
+
+### Reproducer (public API)
+
+```go
+blackfriday.Run([]byte("\r\n\t+ \n: "))
+```
+
+Eight bytes, and **no options**: `Run`'s defaults include `CommonExtensions`,
+which includes `DefinitionLists`. Measured: no return at any timeout tried.
+
+Every part of it is load-bearing, measured by deleting each in turn:
+
+| variant | result |
+|---|---|
+| `"\r\n\t+ \n: "` | hangs |
+| `"\n\t+ \n: "` | returns — the CR is required |
+| `"\r\n + \n: "` | returns — the indent must be a **tab**, not a space |
+| `"\r\n\t+ \n:"` | returns — the trailing space after `:` is required |
+| `"\r\n\t- \n: "`, `"\r\n\t* \n: "` | hang — any bullet character will do |
+
+### Impact
+
+Worse than #4, which at least needs the non-default `Footnotes` extension. This
+one is the documented one-line way to use the library:
+
+```go
+output := blackfriday.Run(input)
+```
+
+Any service rendering user Markdown that way can be wedged by a comment
+containing a tab, a bullet, and a colon. It is an infinite loop rather than an
+allocation loop, so it pins a core rather than exhausting memory — a request
+that never returns, a goroutine that never exits.
+
+### In this port
+
+**Reproduced.** `src/block.rs::paragraph` performs the same handoff and returns
+the same count, because the behaviour is not obviously wrong at the call site
+and diverging from it would change output on inputs that do terminate.
+Verified directly against `examples/render.rs`: it does not return, exactly as
+Go does not.
+
+Found by the differential fuzzer, which reports it as a *shared* hang — both
+implementations stop, so it is agreement rather than a divergence. It is not
+pinned by a test for the same reason as #4: a test that never returns is not a
+test. The fuzzer's supervisor kills and restarts the child instead, records the
+input, and carries on.

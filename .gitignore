@@ -23,3 +23,12 @@ adapter/lib/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Fuzz and bench build output; the harnesses are sources, the binaries are not
+fuzz/*.exe
+fuzz/*.test
+bench/go/*.exe
+
+# Scratch logs. The published fuzz log lives at docs/fuzz-run.log.
+fuzz/*.log
+fuzz/*.txt

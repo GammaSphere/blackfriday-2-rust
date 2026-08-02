@@ -7,6 +7,13 @@ name = "blackfriday"
 version = "0.1.0"
 
 [[package]]
+name = "blackfriday-bench"
+version = "0.1.0"
+dependencies = [
+ "blackfriday",
+]
+
+[[package]]
 name = "blackfriday-ffi"
 version = "0.1.0"
 dependencies = [

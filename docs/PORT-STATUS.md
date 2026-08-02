@@ -8,22 +8,31 @@ deliverable; this exists so the work can be picked up cleanly in a new session.
 | Repo | `E:\projects\raptors-v2` → `git@github.com:GammaSphere/blackfriday-2-rust.git` (`main`) |
 | Upstream | `russross/blackfriday` `v2` @ `4c9bf9512682b995722660a4196c0013228e2049` (= tag **v2.1.0**) |
 | Freeze | **2026-08-03 18:00 UTC** |
-| Last commit | `00883c6` — hand-coded HTML tag matcher |
-| Tests | 189 unit + 9 doctests, all green in debug **and** release |
-| Dependencies | **zero** (`cargo tree` shows only the crate itself) |
+| Tests | 211 unit + 1,449 end-to-end + 1,449 renderer + 11 doctests, green in debug **and** release |
+| Parity | **65 of 65** of upstream's own suite |
+| Fuzzing | **804,261 inputs, 0 divergences** |
+| Dependencies | **zero** |
 | `unsafe` in `src/` | **0** (`#![forbid(unsafe_code)]` on the crate) |
-| Kickoff hash | `dd277c901490fa6f0c57053b927784bb5b5257f9f3d1103fae777122591818a9` — unchanged since commit 02 |
+| Kickoff hash | `dd277c901490fa6f0c57053b927784bb5b5257f9f3d1103fae777122591818a9` — unchanged |
+
+## The port is complete
+
+Everything on the original checklist has landed. What remains is not code:
+
+- [ ] **File the five upstream bugs** at `github.com/russross/blackfriday`.
+      Written up in `BUGS.md` with public-API reproducers. **Needs the user** —
+      filing an issue is an outward-facing action.
+- [ ] **Five-minute demo video.** Cannot be produced from here.
 
 ## How to resume
 
-1. Upstream reference checkout is needed for the generators. Recreate it with:
+1. `cargo` is not on `PATH`; prefix commands with
+   `$env:PATH="$env:USERPROFILE\.cargo\bin;$env:PATH"`.
+2. An upstream reference checkout is needed only to regenerate fixtures:
    ```bash
    git -c core.autocrlf=false clone -b v2 https://github.com/russross/blackfriday.git /tmp/bf
    ```
    `core.autocrlf=false` is not optional — see "CRLF" below.
-2. `cargo` is not on `PATH`; prefix commands with
-   `$env:PATH="$env:USERPROFILE\.cargo\bin;$env:PATH"`.
-3. Pick the first unchecked item under "Remaining work".
 
 ### Verification gate
 
@@ -46,6 +55,36 @@ if($fail -eq 0){"ALL GATES PASS"} else {"GATES FAILED"}
 `cargo test --release` matters: the unescaper relies on wrapping integer
 overflow, which differs between debug and release.
 
+### Running the parity suite
+
+`make` is not installed here. The target's body, spelled out:
+
+```bash
+cd /e/projects/raptors-v2
+rm -rf target/parity && mkdir -p target/parity
+cp adapter/go.mod adapter/blackfriday.go target/parity/
+cp tests/original/*_test.go target/parity/
+cp -r tests/original/testdata target/parity/
+cd target/parity && BF_SERVE=../release/bf-serve.exe go test ./...
+```
+
+Takes about 26 seconds. Rebuild `bf-serve` first if `src/` changed:
+`cargo build --release -p blackfriday-harness`.
+
+### Running the fuzzer
+
+```bash
+cd /e/projects/raptors-v2/fuzz
+go build -o goserve.exe ./cmd/goserve && go build -o bf-fuzz.exe .
+./bf-fuzz.exe -duration 180s -seed 20260803 -limit 2s -log ../docs/fuzz-run.log
+```
+
+Both implementations run as supervised children, so a hang is reported and the
+run continues. Shared hangs are expected — they are `BUGS.md` #4 and #5.
+
+`fuzz/repro.exe` (built from `./cmd/repro`) runs one input through one side;
+combine it with `timeout` to check whether something hangs.
+
 ## The method that has been working
 
 Every module is checked against **measured Go output**, not against a reading of
@@ -55,71 +94,13 @@ stored as `gen_*.go.txt` and copied into a throwaway clone). Fixtures land in
 `tests/fixtures/` and are hex-encoded, since much of this code handles bytes
 that are not valid UTF-8.
 
-This has been worth it: **the fixtures have corrected a wrong hand-written
+This has been worth it: **the fixtures corrected a wrong hand-written
 expectation five separate times**, including twice in a single commit. Assume
 your reading of the Go is wrong until measured.
 
-## What is done
-
-| Module | Contents |
-|---|---|
-| `src/flags.rs` | `Extensions`, `HtmlFlags`, `ListType`, `CellAlignFlags` |
-| `src/node.rs` | arena AST + borrow-free `Walker` |
-| `src/util.rs` | byte predicates, `slugify`, `is_indented` |
-| `src/unicode_tables.rs` | generated Unicode tables (747 ranges + 1,407 lowercase mappings) |
-| `src/entities.rs` | blackfriday's 2,231-entry entity table |
-| `src/esc.rs` | `escape_html`, `escape_all_html`, `esc_link` |
-| `src/html_entities.rs` | Go stdlib's entity tables (2,138 + 91 two-code-point) |
-| `src/unescape.rs` | port of Go's `html.UnescapeString` |
-| `src/markdown.rs` | `Renderer` trait, `Options`, `Markdown`, reference scanners |
-| `src/block.rs` | **the entire block layer**, dispatcher included |
-| `src/html.rs` | renderer config, helpers, tag matcher, `out`/`cr` |
-
-## Remaining work
-
-- [ ] **`render_node`** — `html.go:508-836` (328 lines), plus `render_header`,
-      `render_footer` and `writeTOC` (`html.go:837-940`).
-- [ ] **`src/smartypants.rs`** — `smartypants.go` (398 lines). `HtmlRenderer`
-      needs an `sr: SPRenderer` field; `NewHTMLRenderer` constructs one.
-- [ ] **`src/inline.rs`** — `inline.go` (1,049 lines). The largest module left.
-      Note `inline_html_comment` is currently parked in `block.rs` and should
-      move here when this lands.
-- [ ] **`run()` / `run_with()`** — wire parse → render. Then **remove the
-      `#![allow(dead_code)]` from `src/block.rs` and `src/html.rs`, and the
-      `#[allow(dead_code)]` on `Markdown` in `src/markdown.rs`** — they are only
-      there because nothing outside the crate can reach the internals yet.
-- [ ] `ffi/` — `cdylib` exposing `bf_run`, `bf_free`, `bf_is_fence_line`,
-      `bf_esc`. The **only** place `unsafe` is permitted.
-- [ ] `adapter/` — Go package `blackfriday` with cgo wrappers matching
-      upstream's exported API **plus `isFenceLine` and `esc`**, which the pinned
-      suite reaches directly (they are the only two unexported names it uses).
-- [ ] Drop the pinned `tests/original/*_test.go` in unmodified, run `make parity`,
-      fix divergences, re-verify the kickoff hash.
-- [ ] `PARITY.md` — per-test pass rate, honest failure list.
-- [ ] `fuzz/` — differential harness, ≥60s continuous run, timestamped log.
-- [ ] `bench/` — methodology + results (p99, RSS, startup, throughput).
-- [ ] `DECISIONS.md` — ≥10 substantive entries (material is in "Decisions" below).
-- [ ] Final `README.md` with measured results.
-- [ ] **Five-minute demo video** — cannot be produced from here; needs the user.
-
-## Two upstream bugs found, both with public-API reproducers
-
-Written up in `BUGS.md`. **Neither has been filed upstream yet** — doing so
-during the event is worth +3 (Bug Catcher).
-
-1. **`reBackslashOrAmp` never matches a backslash** (`block.go:30`). The pattern
-   `[\&]` is a character class containing only `&`, because a backslash inside
-   an RE2 class escapes the next byte. A backslash escape is therefore expanded
-   only when an unrelated `&` appears elsewhere in the same string.
-   `Run("```\-go\ncode\n```\n")` gives `class="language-\-go"`.
-2. **`titleBlock` emits a stray empty heading and loses the title**
-   (`block.go:294`). When every line starts with `%`, the scan index never
-   leaves zero, so nothing is consumed — but `addBlock` runs unconditionally.
-   `Run("% a", Titleblock)` gives `<h1 class="title"></h1>` followed by
-   `<p>% a</p>`. Needs input whose last line lacks a trailing newline.
-
-A third unguarded index (`renderParagraph("   ")` panics) is documented as a
-**latent hazard, not claimed as a bug** — no path to it from `Run` was found.
+The differential fuzzer earns its place separately. It found two real port bugs
+that every other layer of testing missed, on inputs no hand-written corpus
+would contain.
 
 ## Things that will bite whoever picks this up
 
@@ -134,34 +115,29 @@ A third unguarded index (`renderParagraph("   ")` panics) is documented as a
   (`isHRule` on `""`/`" "`/`"  "`/`"   "`, `isPrefixHeading("")`,
   `isUnderlinedHeading("")`). Tests assert the panics; returning `false` instead
   would be a silent divergence.
+- **Upstream hangs on some inputs, and the port matches.** `BUGS.md` #4 and #5.
+  Do not "fix" either without deciding to diverge deliberately.
 - **`cargo test --release` is not redundant.** The unescaper depends on wrapping
   `i32` overflow, which panics in debug and wraps in release.
+- **Bytes, not `String`.** Anything lifted out of the document is `Vec<u8>`.
+  `String::from_utf8_lossy` rewrites invalid bytes as U+FFFD and Go's
+  `string([]byte)` does not; that was a real bug in attributes and heading ids.
+- **Reference identity matters.** `p.refs` and `p.notes` share `*reference` in
+  Go, and the aliasing is observable. `RefHandle` is `Rc<RefCell<…>>` for that
+  reason; see `DECISIONS.md` #17.
 - **Dead code is preserved deliberately** in several places — `dliPrefix`'s
   trailing loop never runs, `endsWithBlankLine` is stubbed to `false` behind
-  upstream's own TODO (so `finalizeList` can never clear `tight`), and `html()`'s
-  entire first search pass is commented out. All noted in module docs.
+  upstream's own TODO, `html()`'s entire first search pass is commented out, a
+  cluster of five helpers in `html.go` has no callers at all, and `Softbreak` is
+  never constructed anywhere in v2. All noted in module docs.
 
-## Decisions, for `DECISIONS.md`
+## Where things are written down
 
-1. **v2 over v1.** v1's `Renderer` takes `out *bytes.Buffer` plus `func() bool`
-   closures writing to the same buffer as the caller — aliasing that fights the
-   borrow checker on every renderer method. v2 builds an AST and walks it.
-2. **Arena AST.** Go's `Node` is a cyclic pointer graph. `Vec<Node>` +
-   `NodeId(usize)` gives `Copy` handles with no `Rc`, no `RefCell`, no `unsafe`.
-3. **Borrow-free `Walker`.** Upstream mutates the tree *during* traversal
-   (`markdown.go:410`), which a closure holding `&Arena` cannot express.
-4. **`Vec<u8>` instead of `io::Write`.** Upstream discards every write error, so
-   the observable contract is "append bytes, never fail".
-5. **`Options` builder instead of variadic functional options**, preserving
-   last-writer-wins.
-6. **`RefOverride` enum instead of `Option<Reference>`.** Go's
-   `(*Reference, bool)` has three meanings; collapsing loses one.
-7. **Unicode tables generated from Go**, not `char::is_alphabetic` — 11,171 code
-   points differ, and embedding decouples the port from Rust's Unicode version.
-8. **Hand-coded HTML tag matcher** rather than a regex dependency.
-9. **Zero dependencies, zero `unsafe`** outside the planned `ffi/`.
-10. **cgo adapter rather than translated tests**, keeping the pinned `_test.go`
-    files byte-identical.
-11. **Bugs reproduced, not fixed** — equivalence is the goal; tests pin the buggy
-    behaviour so an upstream fix fails loudly.
-12. **`expandTabs` not ported** — unreachable dead code in v2.
+| document | contents |
+|---|---|
+| `README.md` | the headline results and how to reproduce them |
+| `PARITY.md` | the parity run, per test, and the one declared divergence |
+| `BUGS.md` | five upstream defects with public-API reproducers |
+| `BENCHMARKS.md` | measurements, method, and an honest account of what is slower |
+| `DECISIONS.md` | 19 entries: every place Rust and blackfriday disagreed |
+| `docs/fuzz-run.log` | the timestamped fuzz run behind the README's number |

@@ -41,6 +41,9 @@
 //! turn "explicitly unresolvable" into "look it up anyway", so the port uses
 //! the explicit [`RefOverride`] enum.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::flags::{Extensions, ListType};
 use crate::node::{Arena, NodeId, NodeType, WalkStatus, Walker};
 
@@ -242,6 +245,21 @@ pub enum RefOverride {
 /// A reference-override callback.
 type RefOverrideFn = Box<dyn Fn(&str) -> RefOverride>;
 
+/// A shared, mutable reference — Go's `*reference`.
+///
+/// This is the one place the port uses `Rc<RefCell<…>>`, and it is not a
+/// convenience. Go's `p.refs` is `map[string]*reference` and `p.notes` is
+/// `[]*reference`, and the aliasing between them is **observable**: referencing
+/// one footnote id twice queues the same pointer twice, so when `link` assigns
+/// `ref.footnote` on the second pass it changes what the first queue entry
+/// points at. `parseRefsToAST` then attaches one `Item` node twice and appends
+/// the body to it twice, producing a single `<li>` with its content repeated.
+///
+/// A snapshot cannot express that, and a snapshot is what this was until the
+/// differential fuzzer produced a document with a footnote referenced twice and
+/// the port emitted two `<li>`s where Go emitted one.
+pub(crate) type RefHandle = Rc<RefCell<InternalReference>>;
+
 /// The parser's internal record of a link reference.
 ///
 /// Upstream's unexported `reference`. Byte-oriented because it is filled from
@@ -368,15 +386,16 @@ pub struct Markdown {
     pub(crate) arena: Arena,
     pub(crate) extensions: Extensions,
     reference_override: Option<RefOverrideFn>,
-    pub(crate) refs: std::collections::HashMap<String, InternalReference>,
+    pub(crate) refs: std::collections::HashMap<String, RefHandle>,
 
     pub(crate) nesting: usize,
     pub(crate) max_nesting: usize,
     pub(crate) inside_link: bool,
 
-    /// Ordered footnotes. Empty when the extension is off, matching Go's nil
+    /// Ordered footnotes, sharing identity with [`Self::refs`] exactly as Go's
+    /// `[]*reference` does. Empty when the extension is off, matching Go's nil
     /// slice — nothing distinguishes the two observably.
-    pub(crate) notes: Vec<InternalReference>,
+    pub(crate) notes: Vec<RefHandle>,
 
     pub(crate) doc: NodeId,
     pub(crate) tip: NodeId,
@@ -431,49 +450,34 @@ impl Markdown {
     /// its key exactly as Go does — note that Go uses `strings.ToLower`, which
     /// is Unicode-aware, not an ASCII fold.
     pub(crate) fn get_ref(&self, refid: &str) -> Option<InternalReference> {
-        self.get_ref_owned(refid).map(|(r, _)| r)
+        self.get_ref_handle(refid).map(|h| h.borrow().clone())
     }
 
-    /// The same lookup, also reporting whether the reference is the parser's
-    /// own rather than one the override callback made up.
+    /// The same lookup, returning the handle rather than a copy.
     ///
-    /// Go returns a `*reference`, so a caller that writes through it writes
-    /// into `p.refs` — but only when the reference came from there. The
-    /// override path allocates a fresh one on every call, and mutating that
-    /// changes nothing which outlives the call. [`crate::inline`] depends on
-    /// the difference when it assigns note ids to deferred footnotes, so the
-    /// origin has to be part of the answer here rather than guessed at there.
-    pub(crate) fn get_ref_owned(&self, refid: &str) -> Option<(InternalReference, bool)> {
+    /// This is `getRef` proper: Go hands back a `*reference` into `p.refs`, so
+    /// a caller that writes through it writes into the table, and anything
+    /// else holding that pointer sees the write. The override path allocates a
+    /// fresh one on every call, which is modelled here by a fresh [`Rc`] that
+    /// no table entry shares.
+    pub(crate) fn get_ref_handle(&self, refid: &str) -> Option<RefHandle> {
         if let Some(over) = &self.reference_override {
             match over(refid) {
                 RefOverride::ToNothing => return None,
                 RefOverride::To(r) => {
-                    return Some((
-                        InternalReference {
-                            link: r.link.into_bytes(),
-                            title: r.title.into_bytes(),
-                            note_id: 0,
-                            has_block: false,
-                            footnote: None,
-                            text: r.text.into_bytes(),
-                        },
-                        false,
-                    ))
+                    return Some(Rc::new(RefCell::new(InternalReference {
+                        link: r.link.into_bytes(),
+                        title: r.title.into_bytes(),
+                        note_id: 0,
+                        has_block: false,
+                        footnote: None,
+                        text: r.text.into_bytes(),
+                    })))
                 }
                 RefOverride::NotOverridden => {}
             }
         }
-        self.refs
-            .get(&refid.to_lowercase())
-            .cloned()
-            .map(|r| (r, true))
-    }
-
-    /// Writes a reference back into the parser's table.
-    ///
-    /// Stands in for Go writing through the pointer `get_ref` handed out.
-    pub(crate) fn put_ref(&mut self, refid: &str, r: InternalReference) {
-        self.refs.insert(refid.to_lowercase(), r);
+        self.refs.get(&refid.to_lowercase()).cloned()
     }
 
     /// Closes `block`, moving the insertion point to its parent.
@@ -519,6 +523,12 @@ impl Markdown {
     /// no-op only because the first cleared `content`, which is why the
     /// content is taken rather than copied here.
     pub fn parse(&mut self, input: &[u8]) -> NodeId {
+        // Reserve before parsing rather than growing during it. The divisor is
+        // a measured guess, not a bound: across upstream's own test corpus the
+        // tree comes out at roughly one node per sixteen bytes, and reserving
+        // that up front removes the reallocation that otherwise lands mid-parse.
+        // Being wrong costs a little memory or one growth, never correctness.
+        self.arena.reserve(input.len() / 16 + 8);
         self.block(input);
 
         // Go writes `for p.tip != nil { p.finalize(p.tip) }`. `tip` is a
@@ -569,20 +579,29 @@ impl Markdown {
         let mut flags = ListType::ITEM_BEGINNING_OF_LIST;
         let mut i = 0;
         while i < self.notes.len() {
-            let note = self.notes[i].clone();
-            let Some(footnote) = note.footnote else {
+            // Read through the handle, not from a copy taken when this entry
+            // was queued: Go dereferences the pointer here, so it sees whatever
+            // the most recent `link` assigned. Two entries for one id are the
+            // same pointer, which is why the same `Item` node gets attached
+            // twice and the body appended to it twice.
+            let handle = Rc::clone(&self.notes[i]);
+            let (footnote, link, has_block, title) = {
+                let r = handle.borrow();
+                (r.footnote, r.link.clone(), r.has_block, r.title.clone())
+            };
+            let Some(footnote) = footnote else {
                 // Every reference reaching `notes` was given one by `link`.
                 i += 1;
                 continue;
             };
             self.add_existing_child(footnote);
             self.arena[footnote].list.list_flags = flags | ListType::ORDERED;
-            self.arena[footnote].list.ref_link = Some(note.link.clone());
-            if note.has_block {
+            self.arena[footnote].list.ref_link = Some(link);
+            if has_block {
                 flags |= ListType::ITEM_CONTAINS_BLOCK;
-                self.block(&note.title);
+                self.block(&title);
             } else {
-                self.inline(footnote, &note.title);
+                self.inline(footnote, &title);
             }
             flags = flags.without(ListType::ITEM_BEGINNING_OF_LIST | ListType::ITEM_CONTAINS_BLOCK);
             i += 1;
@@ -715,7 +734,9 @@ impl Markdown {
 
         // Id matches are case-insensitive.
         let id = String::from_utf8_lossy(&data[id_offset..id_end]).to_lowercase();
-        self.refs.insert(id, r);
+        // A second definition of the same id replaces the entry, giving a new
+        // handle; anything already holding the old one keeps it, as in Go.
+        self.refs.insert(id, Rc::new(RefCell::new(r)));
 
         line_end
     }
@@ -921,7 +942,7 @@ mod tests {
         keys.sort();
         let mut out = String::new();
         for k in keys {
-            let r = &p.refs[k];
+            let r = p.refs[k].borrow();
             out.push_str(&format!(
                 " {}/{}/{}/{}/{}",
                 hex(k.as_bytes()),
@@ -1046,10 +1067,10 @@ mod tests {
         let mut p = Markdown::new(Options::common());
         p.refs.insert(
             "myref".to_string(),
-            InternalReference {
+            std::rc::Rc::new(std::cell::RefCell::new(InternalReference {
                 link: b"http://example.com".to_vec(),
                 ..Default::default()
-            },
+            })),
         );
         assert!(p.get_ref("myref").is_some());
         assert!(p.get_ref("MyRef").is_some());
@@ -1063,10 +1084,10 @@ mod tests {
             let mut p = Markdown::new(Options::common().with_ref_override(move |_| o.clone()));
             p.refs.insert(
                 "x".to_string(),
-                InternalReference {
+                std::rc::Rc::new(std::cell::RefCell::new(InternalReference {
                     link: b"from-document".to_vec(),
                     ..Default::default()
-                },
+                })),
             );
             p
         };

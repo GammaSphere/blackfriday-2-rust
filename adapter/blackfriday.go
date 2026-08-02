@@ -263,6 +263,7 @@ const (
 
 	statusResult  = 0
 	statusNeedRef = 1
+	statusPanic   = 2
 )
 
 var (
@@ -349,6 +350,11 @@ func call(op byte, args [][]byte, override ReferenceOverrideFunc) [][]byte {
 		switch status {
 		case statusResult:
 			return vals
+		case statusPanic:
+			// The port panicked. It reproduces upstream's panics on purpose,
+			// so re-raising here is what makes a caller's recover see the
+			// same thing it would have seen from blackfriday itself.
+			panic(string(vals[0]))
 		case statusNeedRef:
 			reply := overrideReply(override, string(vals[0]))
 			if err := writeFrame(serveIn, 0, reply); err != nil {

@@ -71,6 +71,37 @@ const OP_VERSION: u8 = 5;
 const STATUS_RESULT: u8 = 0;
 /// This frame is a request for a reference override.
 const STATUS_NEED_REF: u8 = 1;
+/// The port panicked on this input; the single value is the message.
+const STATUS_PANIC: u8 = 2;
+
+/// Runs `f`, turning a panic into a message instead of unwinding out of the
+/// request loop.
+///
+/// The port reproduces upstream's panics deliberately — six measured inputs
+/// make blackfriday panic, and matching that is the point. A harness that died
+/// on the first of them would be useless, and worse, it would die *between*
+/// reading a request and writing a response, leaving the pipe half a frame out
+/// of step so the next exchange blocks forever. That is exactly what happened
+/// the first time the fuzzer ran long enough to find one.
+///
+/// The Go side turns [`STATUS_PANIC`] back into a Go panic, so a caller's
+/// `recover` sees what it would have seen from upstream.
+fn catching<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    // The default hook would print a backtrace per input, which for a fuzzer
+    // is megabytes of noise about behaviour that is expected.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    std::panic::set_hook(previous);
+
+    result.map_err(|payload| {
+        payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic".to_string())
+    })
+}
 
 fn main() -> io::Result<()> {
     loop {
@@ -78,17 +109,14 @@ fn main() -> io::Result<()> {
             return Ok(()); // the client closed the pipe
         };
 
-        match op {
-            OP_RUN => {
-                let out = do_run(&args);
-                write_frame(STATUS_RESULT, &[out])?;
-            }
-            OP_ESCAPE_HTML => {
+        let outcome: Result<Vec<Vec<u8>>, String> = match op {
+            OP_RUN => catching(|| vec![do_run(&args)]),
+            OP_ESCAPE_HTML => catching(|| {
                 let mut out = Vec::new();
                 escape_html(&mut out, arg(&args, 0));
-                write_frame(STATUS_RESULT, &[out])?;
-            }
-            OP_IS_FENCE_LINE => {
+                vec![out]
+            }),
+            OP_IS_FENCE_LINE => catching(|| {
                 let want_info = arg(&args, 2).first().copied().unwrap_or(0) != 0;
                 let mut info = Vec::new();
                 let (end, marker) = if want_info {
@@ -96,24 +124,23 @@ fn main() -> io::Result<()> {
                 } else {
                     is_fence_line(arg(&args, 0), None, arg(&args, 1))
                 };
-                write_frame(
-                    STATUS_RESULT,
-                    &[(end as u64).to_le_bytes().to_vec(), marker, info],
-                )?;
-            }
+                vec![(end as u64).to_le_bytes().to_vec(), marker, info]
+            }),
             OP_SANITIZED_ANCHOR_NAME => {
-                let name = sanitized_anchor_name_bytes(arg(&args, 0));
-                write_frame(STATUS_RESULT, &[name.into_bytes()])?;
+                catching(|| vec![sanitized_anchor_name_bytes(arg(&args, 0)).into_bytes()])
             }
-            OP_VERSION => {
-                write_frame(STATUS_RESULT, &[blackfriday::VERSION.as_bytes().to_vec()])?;
-            }
+            OP_VERSION => catching(|| vec![blackfriday::VERSION.as_bytes().to_vec()]),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("unknown op {op}"),
                 ))
             }
+        };
+
+        match outcome {
+            Ok(vals) => write_frame(STATUS_RESULT, &vals)?,
+            Err(message) => write_frame(STATUS_PANIC, &[message.into_bytes()])?,
         }
     }
 }
