@@ -43,6 +43,7 @@ pub mod html;
 pub(crate) mod html_entities;
 pub mod markdown;
 pub mod node;
+pub mod smartypants;
 pub mod unescape;
 pub(crate) mod unicode_tables;
 pub mod util;

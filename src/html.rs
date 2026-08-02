@@ -12,6 +12,7 @@
 
 use crate::flags::{CellAlignFlags, HtmlFlags};
 use crate::node::{Arena, NodeId, NodeType};
+use crate::smartypants::SpRenderer;
 use std::collections::HashMap;
 
 /// How singleton tags are closed.
@@ -68,6 +69,9 @@ pub struct HtmlRenderer {
     pub(crate) last_output_len: usize,
     /// When positive, tag output is suppressed (used for image alt text).
     pub(crate) disable_tags: i32,
+
+    /// Smart punctuation state, carried across the whole document.
+    pub(crate) sr: SpRenderer,
 }
 
 impl HtmlRenderer {
@@ -88,12 +92,15 @@ impl HtmlRenderer {
                 "<span aria-label='Return'>\u{21a9}\u{fe0e}</span>".to_string();
         }
 
+        let sr = SpRenderer::new(params.flags);
+
         HtmlRenderer {
             params,
             close_tag,
             heading_ids: HashMap::new(),
             last_output_len: 0,
             disable_tags: 0,
+            sr,
         }
     }
 

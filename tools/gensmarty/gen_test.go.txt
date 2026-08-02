@@ -1,0 +1,177 @@
+package blackfriday
+
+import (
+	"bytes"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Measures the
+// smartypants renderer: which callbacks each flag combination installs, and
+// what Process actually emits.
+//
+// Two things are worth measuring rather than reading:
+//
+//   - smartQuoteHelper's sixteen-way switch on (previousChar, nextChar) is
+//     easy to transcribe subtly wrong, and its result feeds an open/close
+//     state machine that persists across calls.
+//   - smartLeftAngle does `out.Write(text[:i+1])` after a loop that can leave
+//     i == len(text). In Go that is legal whenever cap exceeds len, and it
+//     copies a byte the caller never wrote. The Q lines below force cap == len
+//     with a three-index slice so the two situations can be told apart.
+func TestZZGenSmarty(t *testing.T) {
+	f, err := os.Create("smarty-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	flagSets := []HTMLFlags{
+		0,
+		SmartypantsFractions,
+		SmartypantsDashes,
+		SmartypantsDashes | SmartypantsLatexDashes,
+		SmartypantsLatexDashes,
+		SmartypantsAngledQuotes,
+		SmartypantsQuotesNBSP,
+		SmartypantsAngledQuotes | SmartypantsQuotesNBSP,
+		SmartypantsFractions | SmartypantsDashes | SmartypantsLatexDashes |
+			SmartypantsAngledQuotes | SmartypantsQuotesNBSP,
+	}
+
+	// Which byte values get a callback, per flag set.
+	for _, fl := range flagSets {
+		r := NewSmartypantsRenderer(fl)
+		installed := []byte{}
+		for i := 0; i < 256; i++ {
+			if r.callbacks[i] != nil {
+				installed = append(installed, byte(i))
+			}
+		}
+		fmt.Fprintf(f, "T %d %s\n", int(fl), hex.EncodeToString(installed))
+	}
+
+	inputs := []string{
+		"",
+		"plain text with no specials",
+
+		// double quotes, in every (previous, next) context
+		`"`, `""`, `"a"`, `a"b`, ` " `, `!"!`, `a" `, ` "a`, `!"a`, `a"!`,
+		`he said "hello" to her`,
+		`"quoted" and "again"`,
+		`x"`, `"x`,
+
+		// single quotes and contractions
+		`'`, `''`, `'a'`, `it's`, `don't`, `they're`, `we'll`, `I've`,
+		`'tis`, `dogs'`, `'em`, `s'`, `t'`, `m'`, `d'`,
+		`it'sx`, `they'rex`, `we'llx`, `I'vex`,
+		`can't stop won't stop`,
+		`''a`, `a''`,
+
+		// parens
+		`(c)`, `(C)`, `(r)`, `(R)`, `(tm)`, `(TM)`, `(Tm)`, `(x)`, `(`, `(c`,
+		`(tm`, `(t`, `copyright (c) 2011`,
+
+		// dashes
+		`-`, `--`, `---`, `----`, `a--b`, `a - b`, `a---b`, ` - `, `x-y`,
+		`well-known`, `a -- b`,
+
+		// periods and ellipses
+		`.`, `..`, `...`, `....`, `. . .`, `a...b`, `a. . .b`, `.. .`,
+
+		// numbers and fractions
+		`1/2`, `1/4`, `3/4`, `1/2th`, `1/4th`, `3/4ths`, `2/3`, `5/8`,
+		`12/34`, `1/23/2005`, `1/`, `1`, `3`, `9/10`, `a1/2`, ` 1/2 `,
+		`1/2x`, `/1/2`, "5⁄8", "1⁄2", `100/200`, `0/1`,
+
+		// backticks
+		"`", "``", "``a''", "a``b", "```",
+
+		// left angle
+		`<b>`, `<b`, `a<b`, `<`, `a<`, `<>`, `<a href="x">y</a>`,
+		`less < than`,
+
+		// ampersand variants
+		`&quot;`, `&quot;a&quot;`, `&#0;`, `&amp;`, `&`, `&q`, `&quot`,
+		`a&quot;b`, ` &quot; `, `&quot;&quot;`,
+
+		// mixtures, and non-ASCII
+		`"It's a 1/2 -- (c) test..."`,
+		"café \"naïve\"",
+		"« test »",
+	}
+
+	for _, fl := range flagSets {
+		for _, in := range inputs {
+			out, single, double, panicked := runProcess(fl, []byte(in))
+			fmt.Fprintf(f, "P %d %s %s %v %v %v\n", int(fl),
+				hex.EncodeToString([]byte(in)), hex.EncodeToString(out),
+				single, double, panicked)
+		}
+	}
+
+	// Same inputs, but with cap == len so the slice cannot be read past.
+	for _, in := range inputs {
+		b := make([]byte, len(in), len(in))
+		copy(b, in)
+		exact := b[:len(b):len(b)]
+		out, _, _, panicked := runProcess(0, exact)
+		fmt.Fprintf(f, "Q %s %s %v\n", hex.EncodeToString([]byte(in)),
+			hex.EncodeToString(out), panicked)
+	}
+
+	// State persists across Process calls on one renderer: the quote toggles
+	// are fields, not locals.
+	sequences := [][]string{
+		{`"a`, `b"`},
+		{`"`, `"`, `"`},
+		{`'`, `'`, `'`},
+		{`"a"`, `"b"`},
+		{`&quot;`, `&quot;`},
+	}
+	for si, seq := range sequences {
+		r := NewSmartypantsRenderer(0)
+		var buf bytes.Buffer
+		for _, part := range seq {
+			r.Process(&buf, []byte(part))
+		}
+		fmt.Fprintf(f, "S %d %s %v %v\n", si,
+			hex.EncodeToString(buf.Bytes()), r.inSingleQuote, r.inDoubleQuote)
+	}
+
+	// smartQuoteHelper directly, over every (previousChar, nextChar) class and
+	// both entry states, for each quote letter and both addNBSP settings.
+	classes := []byte{0, ' ', '\t', '!', '.', 'a', '9'}
+	for _, quote := range []byte{'d', 's', 'a'} {
+		for _, addNBSP := range []bool{false, true} {
+			for _, prev := range classes {
+				for _, next := range classes {
+					for _, start := range []bool{false, true} {
+						isOpen := start
+						var buf bytes.Buffer
+						ret := smartQuoteHelper(&buf, prev, next, quote, &isOpen, addNBSP)
+						fmt.Fprintf(f, "H %c %v %d %d %v %s %v %v\n",
+							quote, addNBSP, prev, next, start,
+							hex.EncodeToString(buf.Bytes()), isOpen, ret)
+					}
+				}
+			}
+		}
+	}
+}
+
+func runProcess(fl HTMLFlags, in []byte) (out []byte, single, double, panicked bool) {
+	r := NewSmartypantsRenderer(fl)
+	var buf bytes.Buffer
+	func() {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		r.Process(&buf, in)
+	}()
+	return buf.Bytes(), r.inSingleQuote, r.inDoubleQuote, panicked
+}
