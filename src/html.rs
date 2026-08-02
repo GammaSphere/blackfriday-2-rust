@@ -61,7 +61,7 @@ pub struct HtmlRenderer {
     close_tag: &'static str,
 
     /// Heading ids seen so far, to avoid collisions within one render.
-    heading_ids: HashMap<String, usize>,
+    heading_ids: HashMap<Vec<u8>, usize>,
 
     /// Length of the last thing written; `cr` uses it to avoid double newlines.
     pub(crate) last_output_len: usize,
@@ -114,15 +114,16 @@ impl HtmlRenderer {
     /// yields `foo`, `foo-1`, `foo-2`. When a generated candidate is itself
     /// already taken, upstream falls back to appending `-1` repeatedly, which
     /// this reproduces.
-    pub fn ensure_unique_heading_id(&mut self, id: &str) -> String {
-        let mut id = id.to_string();
+    pub fn ensure_unique_heading_id(&mut self, id: &[u8]) -> Vec<u8> {
+        let mut id = id.to_vec();
         while let Some(&count) = self.heading_ids.get(&id) {
-            let tmp = format!("{id}-{}", count + 1);
+            let mut tmp = id.clone();
+            tmp.extend_from_slice(format!("-{}", count + 1).as_bytes());
             if !self.heading_ids.contains_key(&tmp) {
                 self.heading_ids.insert(id.clone(), count + 1);
                 id = tmp;
             } else {
-                id = format!("{id}-1");
+                id.extend_from_slice(b"-1");
             }
         }
         self.heading_ids.entry(id.clone()).or_insert(0);
@@ -154,11 +155,21 @@ impl HtmlRenderer {
     /// Ported from `tag` (`html.go:333`). Sets `last_output_len` to 1 rather
     /// than the true length, which is deliberate upstream: only "did anything
     /// get written" matters to [`Self::cr`].
-    pub(crate) fn tag(&mut self, out: &mut Vec<u8>, name: &[u8], attrs: &[String]) {
+    pub(crate) fn tag(&mut self, out: &mut Vec<u8>, name: &[u8], attrs: &[Vec<u8>]) {
         out.extend_from_slice(name);
         if !attrs.is_empty() {
             out.push(b' ');
-            out.extend_from_slice(attrs.join(" ").as_bytes());
+            // Joined as bytes rather than through `String::join`: an
+            // attribute can carry a link, a title or an info string lifted
+            // straight out of the document, and those are bytes. Going via
+            // `String` rewrites anything invalid as U+FFFD, which Go does
+            // not do -- found by the differential fuzzer, not by reading.
+            for (i, a) in attrs.iter().enumerate() {
+                if i > 0 {
+                    out.push(b' ');
+                }
+                out.extend_from_slice(a);
+            }
         }
         out.push(b'>');
         self.last_output_len = 1;
@@ -607,7 +618,7 @@ pub(crate) fn is_relative_link(link: &[u8]) -> bool {
 /// Ported from `appendLinkAttrs` (`html.go:282`). Relative links get nothing.
 /// Note `target="_blank"` is appended even when no `rel` value applies, so the
 /// early return below it only skips the `rel` attribute.
-pub(crate) fn append_link_attrs(attrs: &mut Vec<String>, flags: HtmlFlags, link: &[u8]) {
+pub(crate) fn append_link_attrs(attrs: &mut Vec<Vec<u8>>, flags: HtmlFlags, link: &[u8]) {
     if is_relative_link(link) {
         return;
     }
@@ -622,12 +633,12 @@ pub(crate) fn append_link_attrs(attrs: &mut Vec<String>, flags: HtmlFlags, link:
         val.push("noopener");
     }
     if flags.intersects(HtmlFlags::HREF_TARGET_BLANK) {
-        attrs.push("target=\"_blank\"".to_string());
+        attrs.push(b"target=\"_blank\"".to_vec());
     }
     if val.is_empty() {
         return;
     }
-    attrs.push(format!("rel=\"{}\"", val.join(" ")));
+    attrs.push(format!("rel=\"{}\"", val.join(" ")).into_bytes());
 }
 
 /// Whether `link` is a `mailto:` URL.
@@ -653,7 +664,7 @@ pub(crate) fn is_smartypantable(arena: &Arena, node: NodeId) -> bool {
 /// Ported from `appendLanguageAttr` (`html.go:322`). Only the first
 /// whitespace-delimited word is used, so ```` ```go linenums ```` gives
 /// `language-go`.
-pub(crate) fn append_language_attr(attrs: &mut Vec<String>, info: &[u8]) {
+pub(crate) fn append_language_attr(attrs: &mut Vec<Vec<u8>>, info: &[u8]) {
     if info.is_empty() {
         return;
     }
@@ -661,10 +672,11 @@ pub(crate) fn append_language_attr(attrs: &mut Vec<String>, info: &[u8]) {
         .iter()
         .position(|&c| c == b'\t' || c == b' ')
         .unwrap_or(info.len());
-    attrs.push(format!(
-        "class=\"language-{}\"",
-        String::from_utf8_lossy(&info[..end_of_lang])
-    ));
+    // The info string comes out of the document, so it is built as bytes.
+    let mut attr = b"class=\"language-".to_vec();
+    attr.extend_from_slice(&info[..end_of_lang]);
+    attr.push(b'\"');
+    attrs.push(attr);
 }
 
 /// Builds a footnote reference anchor.
@@ -863,7 +875,8 @@ impl HtmlRenderer {
             {
                 in_heading = entering;
                 if entering {
-                    arena.get_mut(node).heading.heading_id = format!("toc_{heading_count}");
+                    arena.get_mut(node).heading.heading_id =
+                        format!("toc_{heading_count}").into_bytes();
                     let level = arena[node].heading.level;
                     if level == toc_level {
                         buf.extend_from_slice(b"</li>\n\n<li>");
@@ -926,7 +939,7 @@ impl Renderer for HtmlRenderer {
         node: NodeId,
         entering: bool,
     ) -> WalkStatus {
-        let mut attrs: Vec<String> = Vec::new();
+        let mut attrs: Vec<Vec<u8>> = Vec::new();
         match arena[node].node_type {
             NodeType::Text => {
                 if self.params.flags.intersects(HtmlFlags::SMARTYPANTS) {
@@ -981,7 +994,7 @@ impl Renderer for HtmlRenderer {
                     let mut href_buf: Vec<u8> = b"href=\"".to_vec();
                     esc_link(&mut href_buf, &dest);
                     href_buf.push(b'"');
-                    attrs.push(String::from_utf8_lossy(&href_buf).into_owned());
+                    attrs.push(href_buf);
                     if arena[node].link.note_id != 0 {
                         // Note this uses the *unprefixed* destination, unlike
                         // the href just built.
@@ -1003,7 +1016,7 @@ impl Renderer for HtmlRenderer {
                         let mut title_buf: Vec<u8> = b"title=\"".to_vec();
                         escape_html(&mut title_buf, arena[node].link.title.as_ref().unwrap());
                         title_buf.push(b'"');
-                        attrs.push(String::from_utf8_lossy(&title_buf).into_owned());
+                        attrs.push(title_buf);
                     }
                     self.tag(out, b"<a", &attrs);
                 } else if arena[node].link.note_id == 0 {
@@ -1104,18 +1117,17 @@ impl Renderer for HtmlRenderer {
                 let (open_tag, close_tag) = heading_tags_from_level(heading_level);
                 if entering {
                     if arena[node].heading.is_titleblock {
-                        attrs.push("class=\"title\"".to_string());
+                        attrs.push(b"class=\"title\"".to_vec());
                     }
                     if !arena[node].heading.heading_id.is_empty() {
-                        let mut id =
-                            self.ensure_unique_heading_id(&arena[node].heading.heading_id.clone());
-                        if !self.params.heading_id_prefix.is_empty() {
-                            id = format!("{}{id}", self.params.heading_id_prefix);
-                        }
-                        if !self.params.heading_id_suffix.is_empty() {
-                            id = format!("{id}{}", self.params.heading_id_suffix);
-                        }
-                        attrs.push(format!("id=\"{id}\""));
+                        let base = arena[node].heading.heading_id.clone();
+                        let unique = self.ensure_unique_heading_id(&base);
+                        let mut attr = b"id=\"".to_vec();
+                        attr.extend_from_slice(self.params.heading_id_prefix.as_bytes());
+                        attr.extend_from_slice(&unique);
+                        attr.extend_from_slice(self.params.heading_id_suffix.as_bytes());
+                        attr.push(b'\"');
+                        attrs.push(attr);
                     }
                     self.cr(out);
                     self.tag(out, open_tag, &attrs);
@@ -1261,7 +1273,7 @@ impl Renderer for HtmlRenderer {
                 if entering {
                     let align = cell_alignment(arena[node].table_cell.align);
                     if !align.is_empty() {
-                        attrs.push(format!("align=\"{align}\""));
+                        attrs.push(format!("align=\"{align}\"").into_bytes());
                     }
                     if arena[node].prev().is_none() {
                         self.cr(out);
@@ -1329,6 +1341,14 @@ impl Renderer for HtmlRenderer {
 mod tests {
     use super::*;
 
+    /// Joins attributes the way the fixture records them, as bytes.
+    fn join_attrs(attrs: &[Vec<u8>]) -> Vec<u8> {
+        if attrs.is_empty() {
+            return b"-".to_vec();
+        }
+        attrs.join(&b'|')
+    }
+
     fn renderer(flags: HtmlFlags) -> HtmlRenderer {
         HtmlRenderer::new(HtmlRendererParameters {
             flags,
@@ -1360,7 +1380,7 @@ mod tests {
         let mut n = 0;
         for f in rows("U") {
             assert_eq!(
-                r.ensure_unique_heading_id(&f[1]),
+                String::from_utf8(r.ensure_unique_heading_id(f[1].as_bytes())).unwrap(),
                 f[2],
                 "ensure_unique_heading_id({:?})",
                 f[1]
@@ -1398,13 +1418,9 @@ mod tests {
             let link = unhex(&f[2]);
             let mut attrs = Vec::new();
             append_link_attrs(&mut attrs, flags, &link);
-            let joined = if attrs.is_empty() {
-                "-".to_string()
-            } else {
-                attrs.join("|")
-            };
+            let joined = join_attrs(&attrs);
             assert_eq!(
-                joined.as_bytes(),
+                joined,
                 unhex(&f[3]),
                 "append_link_attrs({flags:?}, {:?})",
                 String::from_utf8_lossy(&link)
@@ -1415,12 +1431,8 @@ mod tests {
             let info = unhex(&f[1]);
             let mut attrs = Vec::new();
             append_language_attr(&mut attrs, &info);
-            let joined = if attrs.is_empty() {
-                "-".to_string()
-            } else {
-                attrs.join("|")
-            };
-            assert_eq!(joined.as_bytes(), unhex(&f[2]));
+            let joined = join_attrs(&attrs);
+            assert_eq!(joined, unhex(&f[2]));
         }
 
         for f in rows("T") {
@@ -1625,12 +1637,12 @@ mod tests {
     #[test]
     fn heading_ids_are_made_unique() {
         let mut r = renderer(HtmlFlags::NONE);
-        assert_eq!(r.ensure_unique_heading_id("foo"), "foo");
-        assert_eq!(r.ensure_unique_heading_id("foo"), "foo-1");
-        assert_eq!(r.ensure_unique_heading_id("foo"), "foo-2");
-        assert_eq!(r.ensure_unique_heading_id("bar"), "bar");
+        assert_eq!(r.ensure_unique_heading_id(b"foo"), b"foo");
+        assert_eq!(r.ensure_unique_heading_id(b"foo"), b"foo-1");
+        assert_eq!(r.ensure_unique_heading_id(b"foo"), b"foo-2");
+        assert_eq!(r.ensure_unique_heading_id(b"bar"), b"bar");
         // An explicit collision with a generated name still resolves.
-        assert_eq!(r.ensure_unique_heading_id("foo-1"), "foo-1-1");
+        assert_eq!(r.ensure_unique_heading_id(b"foo-1"), b"foo-1-1");
     }
 
     #[test]
@@ -1678,19 +1690,19 @@ mod tests {
         );
         assert_eq!(
             attrs(HtmlFlags::NOFOLLOW_LINKS, b"http://x"),
-            vec!["rel=\"nofollow\""]
+            vec![b"rel=\"nofollow\"".to_vec()]
         );
         assert_eq!(
             attrs(
                 HtmlFlags::NOFOLLOW_LINKS | HtmlFlags::NOREFERRER_LINKS,
                 b"http://x"
             ),
-            vec!["rel=\"nofollow noreferrer\""]
+            vec![b"rel=\"nofollow noreferrer\"".to_vec()]
         );
         // target is appended even with no rel value.
         assert_eq!(
             attrs(HtmlFlags::HREF_TARGET_BLANK, b"http://x"),
-            vec!["target=\"_blank\""]
+            vec![b"target=\"_blank\"".to_vec()]
         );
         // ...and comes before rel when both apply.
         assert_eq!(
@@ -1698,7 +1710,7 @@ mod tests {
                 HtmlFlags::HREF_TARGET_BLANK | HtmlFlags::NOOPENER_LINKS,
                 b"http://x"
             ),
-            vec!["target=\"_blank\"", "rel=\"noopener\""]
+            vec![b"target=\"_blank\"".to_vec(), b"rel=\"noopener\"".to_vec()]
         );
     }
 
@@ -1709,9 +1721,12 @@ mod tests {
             append_language_attr(&mut a, info);
             a
         };
-        assert_eq!(attr(b"go"), vec!["class=\"language-go\""]);
-        assert_eq!(attr(b"go linenums"), vec!["class=\"language-go\""]);
-        assert_eq!(attr(b"go\ttabbed"), vec!["class=\"language-go\""]);
+        assert_eq!(attr(b"go"), vec![b"class=\"language-go\"".to_vec()]);
+        assert_eq!(
+            attr(b"go linenums"),
+            vec![b"class=\"language-go\"".to_vec()]
+        );
+        assert_eq!(attr(b"go\ttabbed"), vec![b"class=\"language-go\"".to_vec()]);
         assert!(attr(b"").is_empty());
     }
 

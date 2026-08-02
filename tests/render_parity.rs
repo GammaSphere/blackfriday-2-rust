@@ -117,7 +117,7 @@ fn cases() -> Vec<Case> {
                     let n = case.arena.get_mut(id);
                     n.literal = bytes(f[4]);
                     n.heading.level = f[5].parse().unwrap();
-                    n.heading.heading_id = string(f[6]);
+                    n.heading.heading_id = bytes(f[6]);
                     n.heading.is_titleblock = f[7] == "true";
                     n.list.list_flags = ListType::from_bits_retain(f[8].parse().unwrap());
                     n.list.tight = f[9] == "true";

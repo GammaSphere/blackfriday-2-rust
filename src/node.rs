@@ -300,7 +300,10 @@ pub struct HeadingData {
     /// Heading level, 1 through 6.
     pub level: i32,
     /// Explicit or generated heading ID, when there is one.
-    pub heading_id: String,
+    /// Bytes, not a `String`: Go's `HeadingID` is a `string` filled from
+    /// `{#id}` in the document, which need not be valid UTF-8, and going
+    /// through `from_utf8_lossy` would rewrite those bytes as U+FFFD.
+    pub heading_id: Vec<u8>,
     /// True when this is a title block rather than a heading.
     pub is_titleblock: bool,
 }

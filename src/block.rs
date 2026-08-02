@@ -1889,9 +1889,9 @@ impl Markdown {
                         eol -= 1;
                     }
 
-                    let mut id = String::new();
+                    let mut id: Vec<u8> = Vec::new();
                     if self.extensions.intersects(Extensions::AUTO_HEADING_IDS) {
-                        id = sanitized_anchor_name_bytes(&data[prev..eol]);
+                        id = sanitized_anchor_name_bytes(&data[prev..eol]).into_bytes();
                     }
 
                     let block = self.add_block(NodeType::Heading, &data[prev..eol]);
@@ -2008,7 +2008,7 @@ impl Markdown {
         let i = skip_char(data, level, b' ');
         let mut end = skip_until_char(data, i, b'\n');
         let mut skip = end;
-        let mut id = String::new();
+        let mut id: Vec<u8> = Vec::new();
 
         if self.extensions.intersects(crate::Extensions::HEADING_IDS) {
             // Find the start and end of an explicit {#id}.
@@ -2021,7 +2021,10 @@ impl Markdown {
                 k += 1;
             }
             if j < end && k < end {
-                id = String::from_utf8_lossy(&data[j + 2..k]).into_owned();
+                // Kept as bytes: a `{#id}` is copied out of the document and
+                // Go's `string(...)` conversion preserves whatever is there,
+                // valid UTF-8 or not.
+                id = data[j + 2..k].to_vec();
                 end = j;
                 skip = k + 1;
                 while end > 0 && data[end - 1] == b' ' {
@@ -2046,7 +2049,7 @@ impl Markdown {
                     .extensions
                     .intersects(crate::Extensions::AUTO_HEADING_IDS)
             {
-                id = sanitized_anchor_name_bytes(&data[i..end]);
+                id = sanitized_anchor_name_bytes(&data[i..end]).into_bytes();
             }
             let block = self.add_block(NodeType::Heading, &data[i..end]);
             self.arena[block].heading.heading_id = id;
@@ -3667,7 +3670,7 @@ mod tests {
         let mut p = Markdown::new(Options::none().with_extensions(Extensions::HEADING_IDS));
         let skip = p.prefix_heading(b"# Hello {#custom}\n");
         let h = p.arena()[p.document()].first_child().unwrap();
-        assert_eq!(p.arena()[h].heading.heading_id, "custom");
+        assert_eq!(p.arena()[h].heading.heading_id, b"custom");
         assert_eq!(p.arena()[h].content, b"Hello", "id is stripped from text");
         assert_eq!(skip, 17, "but still consumed");
     }
@@ -3679,7 +3682,7 @@ mod tests {
         let mut p = Markdown::new(Options::none().with_extensions(Extensions::AUTO_HEADING_IDS));
         p.prefix_heading(b"# Hello, World!\n");
         let h = p.arena()[p.document()].first_child().unwrap();
-        assert_eq!(p.arena()[h].heading.heading_id, "hello-world");
+        assert_eq!(p.arena()[h].heading.heading_id, b"hello-world");
     }
 
     #[test]
