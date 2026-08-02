@@ -1,0 +1,106 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Emits measured Go
+// answers for the block-level scanners, and records which inputs make upstream
+// panic rather than return -- several of these functions index data[0] or
+// data[i] with no bounds check, so "PANIC" is a legitimate recorded outcome.
+
+func safeHRule(p *Markdown, d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	return fmt.Sprintf("%v", p.isHRule(d))
+}
+
+func safePrefixHeading(p *Markdown, d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	return fmt.Sprintf("%v", p.isPrefixHeading(d))
+}
+
+func safeUnderlined(p *Markdown, d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	return fmt.Sprintf("%d", p.isUnderlinedHeading(d))
+}
+
+func TestZZGenBlock(t *testing.T) {
+	f, err := os.Create("block-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	plain := New()
+	space := New(WithExtensions(SpaceHeadings))
+
+	cases := [][]byte{
+		[]byte(""), []byte(" "), []byte("  "), []byte("   "), []byte("    "),
+		[]byte("\n"), []byte(" \n"), []byte("\t\n"), []byte("  \t  \n"),
+		[]byte("***"), []byte("---"), []byte("___"),
+		[]byte("***\n"), []byte("---\n"), []byte("___\n"),
+		[]byte("* * *"), []byte("- - -"), []byte("_ _ _"),
+		[]byte("**"), []byte("--"), []byte("__"), []byte("*-*"),
+		[]byte("   ***"), []byte("    ***"), []byte("*  *  *  *"),
+		[]byte("-\n"), []byte("*\n"), []byte("---x"), []byte("*** x"), []byte("___ "),
+		[]byte("#"), []byte("##"), []byte("######"), []byte("#######"),
+		[]byte("# h"), []byte("#h"), []byte("## h"), []byte("#### h"),
+		[]byte("# h #"), []byte("# h ###"),
+		{'#', ' ', 'h', ' ', '\\', '#'},
+		[]byte("# h #x"), []byte("#\n"), []byte("# \n"),
+		[]byte("="), []byte("=="), []byte("=\n"), []byte("==\n"), []byte("= \n"),
+		[]byte("=x\n"), []byte("--\n"), []byte("- \n"),
+		[]byte("text"), []byte("  text  "), []byte("\ttext"),
+		{'#', ' ', 'h', ' ', '{', '#', 'i', 'd', '}'},
+	}
+	for _, d := range cases {
+		fmt.Fprintf(f, "E %s %d\n", hex.EncodeToString(d), plain.isEmpty(d))
+		fmt.Fprintf(f, "R %s %s\n", hex.EncodeToString(d), safeHRule(plain, d))
+		fmt.Fprintf(f, "P %s %s %s\n", hex.EncodeToString(d),
+			safePrefixHeading(plain, d), safePrefixHeading(space, d))
+		fmt.Fprintf(f, "U %s %s\n", hex.EncodeToString(d), safeUnderlined(plain, d))
+	}
+
+	for _, c := range []struct {
+		s     []byte
+		start int
+		ch    byte
+	}{
+		{[]byte("aaab"), 0, 'a'}, {[]byte("aaab"), 1, 'a'}, {[]byte("aaab"), 4, 'a'},
+		{[]byte(""), 0, 'a'}, {[]byte("###x"), 0, '#'},
+		{[]byte("abc\ndef"), 0, '\n'}, {[]byte("abc"), 0, '\n'},
+	} {
+		fmt.Fprintf(f, "S %s %d %02x %d %d\n", hex.EncodeToString(c.s), c.start, c.ch,
+			skipChar(c.s, c.start, c.ch), skipUntilChar(c.s, c.start, c.ch))
+	}
+
+	for _, c := range []struct {
+		s []byte
+		i int
+	}{
+		{[]byte("a#"), 1},
+		{[]byte{'\\', '#'}, 1},
+		{[]byte{'\\', '\\', '#'}, 2},
+		{[]byte{'\\', '\\', '\\', '#'}, 3},
+		{[]byte("#"), 0},
+		{[]byte{'\\', '\\', '\\', '\\', '#'}, 4},
+	} {
+		fmt.Fprintf(f, "B %s %d %v\n", hex.EncodeToString(c.s), c.i,
+			isBackslashEscaped(c.s, c.i))
+	}
+}

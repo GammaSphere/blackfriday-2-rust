@@ -207,12 +207,10 @@ impl Options {
 ///
 /// The pointer fields of the Go original — `doc`, `tip`, `oldTip`,
 /// `lastMatchedContainer` — are [`NodeId`]s into an owned [`Arena`].
-//
-// The parser state below is written by `Markdown::new` and read by the block
-// and inline scanners, which land in the next commits. Until then rustc sees
-// fields that are only ever written and methods only the tests call, so the
-// allow is scoped to this type and comes off as soon as `block.rs` grows its
-// first scanner.
+// The parser state is written by `new` and read by the scanners in `block.rs`
+// and `inline.rs`. None of it is reachable from outside the crate until the
+// `run` entry point lands, so rustc sees write-only fields and methods only the
+// tests call. The allow is scoped to this type and comes off with `run`.
 #[allow(dead_code)]
 pub struct Markdown {
     pub(crate) arena: Arena,
