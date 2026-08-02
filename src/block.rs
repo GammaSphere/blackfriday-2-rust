@@ -1249,6 +1249,171 @@ impl Markdown {
         i
     }
 
+    /// Length of an HTML comment at the start of `data`, or `0`.
+    ///
+    /// Ported from `inlineHTMLComment` (`inline.go`). Lives here because
+    /// [`Markdown::html_comment`] is its only caller so far; it moves to the
+    /// inline module when the rest of that file lands.
+    ///
+    /// The scan starts at index 5, so `<!-->` and `<!--->` are not comments
+    /// however they look — the closing `-->` has to begin at index 3 or later.
+    pub(crate) fn inline_html_comment(&self, data: &[u8]) -> usize {
+        if data.len() < 5 {
+            return 0;
+        }
+        if data[0] != b'<' || data[1] != b'!' || data[2] != b'-' || data[3] != b'-' {
+            return 0;
+        }
+        let mut i = 5usize;
+        // Scan for the end-of-comment marker, across lines if necessary.
+        while i < data.len() && !(data[i - 2] == b'-' && data[i - 1] == b'-' && data[i] == b'>') {
+            i += 1;
+        }
+        // No end-of-comment marker.
+        if i >= data.len() {
+            return 0;
+        }
+        i + 1
+    }
+
+    /// Parses an HTML comment block, which must be followed by a blank line.
+    ///
+    /// Ported from `htmlComment` (`block.go:422`).
+    pub(crate) fn html_comment(&mut self, data: &[u8], do_render: bool) -> usize {
+        let i = self.inline_html_comment(data);
+        let j = is_empty(&data[i..]);
+        if j > 0 {
+            let size = i + j;
+            if do_render {
+                let mut end = size;
+                while end > 0 && data[end - 1] == b'\n' {
+                    end -= 1;
+                }
+                let block = self.add_block(NodeType::HTMLBlock, &data[..end]);
+                finalize_html_block(&mut self.arena, block);
+            }
+            return size;
+        }
+        0
+    }
+
+    /// Parses a block of preformatted HTML.
+    ///
+    /// Ported from `html` (`block.go:318`). Falls back to comment and `<hr>`
+    /// handling when the opening tag is not a recognised block tag.
+    ///
+    /// Upstream's first search pass — an unindented closing tag followed by a
+    /// blank line — is entirely commented out, so `found` is always false when
+    /// the second pass begins and only the indented search actually runs. The
+    /// `!found &&` guard on it is therefore always true. Ported as it behaves,
+    /// with the vestigial condition dropped rather than transcribed as an
+    /// always-true test.
+    ///
+    /// The `ins`/`del` exclusion is real and comes from Markdown.pl.
+    ///
+    /// # Panics
+    ///
+    /// On empty input, matching upstream's unguarded `data[0]`.
+    pub(crate) fn html(&mut self, data: &[u8], do_render: bool) -> usize {
+        if data[0] != b'<' {
+            return 0;
+        }
+        let curtag = html_find_tag(&data[1..]).map(str::to_string);
+
+        let Some(curtag) = curtag else {
+            // Not a block tag: try the special cases.
+            let size = self.html_comment(data, do_render);
+            if size > 0 {
+                return size;
+            }
+            let size = self.html_hr(data, do_render);
+            if size > 0 {
+                return size;
+            }
+            return 0;
+        };
+
+        let mut found = false;
+        let mut i = 0usize;
+
+        // Second pass: look for an indented match. Skipped for ins and del,
+        // following original Markdown.pl.
+        if curtag != "ins" && curtag != "del" {
+            let lax = self
+                .extensions
+                .intersects(crate::Extensions::LAX_HTML_BLOCKS);
+            i = 1;
+            while i < data.len() {
+                i += 1;
+                while i < data.len() && !(data[i - 1] == b'<' && data[i] == b'/') {
+                    i += 1;
+                }
+
+                if i + 2 + curtag.len() >= data.len() {
+                    break;
+                }
+
+                let j = html_find_end(&curtag, &data[i - 1..], lax);
+                if j > 0 {
+                    i += j - 1;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if !found {
+            return 0;
+        }
+
+        if do_render {
+            let mut end = i;
+            while end > 0 && data[end - 1] == b'\n' {
+                end -= 1;
+            }
+            let block = self.add_block(NodeType::HTMLBlock, &data[..end]);
+            finalize_html_block(&mut self.arena, block);
+        }
+
+        i
+    }
+
+    /// Appends a `Paragraph` node, trimming surrounding whitespace.
+    ///
+    /// Ported from `renderParagraph` (`block.go:1428`). Empty input produces no
+    /// node at all.
+    ///
+    /// # Panics
+    ///
+    /// On input consisting only of spaces, such as `"   "`. Go's leading-space
+    /// trim is `for data[beg] == ' ' { beg++ }` with no length guard, so it runs
+    /// off the end; Rust's bounds check panics at the same point. Reachability
+    /// from the public entry point is unconfirmed — every call site passes a
+    /// slice ending at a line boundary, and an all-spaces line is caught by
+    /// `is_empty` first — so this is recorded as a latent hazard rather than
+    /// claimed as a reachable bug.
+    pub(crate) fn render_paragraph(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+
+        // Trim leading spaces. Unguarded upstream; see the note above.
+        let mut beg = 0usize;
+        while data[beg] == b' ' {
+            beg += 1;
+        }
+
+        let mut end = data.len();
+        if data[data.len() - 1] == b'\n' {
+            end -= 1;
+        }
+        while end > beg && data[end - 1] == b' ' {
+            end -= 1;
+        }
+
+        self.add_block(NodeType::Paragraph, &data[beg..end]);
+    }
+
     /// Whether `data` begins an ATX heading.
     ///
     /// Ported from `isPrefixHeading` (`block.go:207`). With
@@ -2454,6 +2619,177 @@ mod tests {
         let (size, cols) = p.table_header(b"a \\| b | c\n--- | ---\n");
         assert_ne!(size, 0, "an escaped pipe still leaves two columns");
         assert_eq!(cols.len(), 2);
+    }
+
+    /// Measured Go answers for the HTML-block and paragraph scanners.
+    const HTMLBLOCK_FIXTURE: &str = include_str!("../tests/fixtures/go-htmlblock.txt");
+
+    fn hb_rows(tag: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+        HTMLBLOCK_FIXTURE.lines().filter_map(move |l| {
+            let f: Vec<String> = l.split(' ').map(str::to_string).collect();
+            (f.first().map(String::as_str) == Some(tag)).then_some(f)
+        })
+    }
+
+    #[test]
+    fn inline_html_comment_matches_go() {
+        use crate::markdown::Options;
+        let p = Markdown::new(Options::none());
+        let mut n = 0;
+        for f in hb_rows("I") {
+            let data = unhex(&f[1]);
+            assert_eq!(
+                p.inline_html_comment(&data),
+                f[2].parse::<usize>().unwrap(),
+                "inline_html_comment({:?})",
+                String::from_utf8_lossy(&data)
+            );
+            n += 1;
+        }
+        assert!(n >= 10, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn html_comment_matches_go() {
+        use crate::markdown::Options;
+        let mut n = 0;
+        for f in hb_rows("C") {
+            let data = unhex(&f[1]);
+            let mut p = Markdown::new(Options::none());
+            let got = p.html_comment(&data, true);
+            let ctx = format!("html_comment({:?})", String::from_utf8_lossy(&data));
+            assert_eq!(got, f[2].parse::<usize>().unwrap(), "{ctx} size");
+            let lit = match p.arena()[p.document()].first_child() {
+                Some(c) => p.arena()[c].literal.clone(),
+                None => Vec::new(),
+            };
+            assert_eq!(lit, unhex(&f[3]), "{ctx} literal");
+            n += 1;
+        }
+        assert!(n >= 5, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn html_block_matches_go_in_both_lax_modes() {
+        use crate::markdown::Options;
+        use crate::Extensions;
+        let mut n = 0;
+        for f in hb_rows("B") {
+            let data = unhex(&f[1]);
+            let pipe = f.iter().position(|s| s == "|").unwrap();
+            let ctx = format!("html({:?})", String::from_utf8_lossy(&data));
+
+            for (lax, base) in [(false, 2usize), (true, pipe + 1)] {
+                let ext = if lax {
+                    Extensions::LAX_HTML_BLOCKS
+                } else {
+                    Extensions::NONE
+                };
+                let mut p = Markdown::new(Options::none().with_extensions(ext));
+                let got = p.html(&data, true);
+                assert_eq!(
+                    got,
+                    f[base].parse::<usize>().unwrap(),
+                    "{ctx} size [lax={lax}]"
+                );
+                let lit = match p.arena()[p.document()].first_child() {
+                    Some(c) => p.arena()[c].literal.clone(),
+                    None => Vec::new(),
+                };
+                assert_eq!(lit, unhex(&f[base + 1]), "{ctx} literal [lax={lax}]");
+            }
+            n += 1;
+        }
+        assert!(n >= 12, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn render_paragraph_matches_go_including_where_go_panics() {
+        use crate::markdown::Options;
+        let mut panics = 0;
+        let mut n = 0;
+        for f in hb_rows("P") {
+            let data = unhex(&f[1]);
+            let got = catch(std::panic::AssertUnwindSafe(|| {
+                let mut p = Markdown::new(Options::none());
+                p.render_paragraph(&data);
+                let kids = p.arena().children(p.document()).count();
+                let lit = match p.arena()[p.document()].first_child() {
+                    Some(c) => p.arena()[c].content.clone(),
+                    None => Vec::new(),
+                };
+                (kids, lit)
+            }));
+            if f[2] == "PANIC" {
+                assert!(
+                    got.is_none(),
+                    "upstream panics on {:?}; the port must too",
+                    String::from_utf8_lossy(&data)
+                );
+                panics += 1;
+            } else {
+                let (kids, lit) = got.expect("should not have panicked");
+                let ctx = format!("render_paragraph({:?})", String::from_utf8_lossy(&data));
+                assert_eq!(kids, f[2].parse::<usize>().unwrap(), "{ctx} node count");
+                assert_eq!(lit, unhex(&f[3]), "{ctx} content");
+            }
+            n += 1;
+        }
+        assert!(n >= 9, "thin corpus: {n}");
+        assert_eq!(panics, 1, "the all-spaces case");
+    }
+
+    #[test]
+    fn render_paragraph_panics_on_all_spaces_like_upstream() {
+        use crate::markdown::Options;
+        // Go's leading-space trim has no length guard. Documented as a latent
+        // hazard rather than a reachable bug: every call site passes a slice
+        // ending at a line boundary, and an all-spaces line is caught by
+        // is_empty before it gets here.
+        let got = catch(std::panic::AssertUnwindSafe(|| {
+            let mut p = Markdown::new(Options::none());
+            p.render_paragraph(b"   ");
+        }));
+        assert!(got.is_none());
+
+        // A single trailing newline makes it safe again.
+        let mut p = Markdown::new(Options::none());
+        p.render_paragraph(b"   \n");
+        assert_eq!(p.arena().children(p.document()).count(), 1);
+    }
+
+    #[test]
+    fn html_comment_start_offset_rejects_short_forms() {
+        use crate::markdown::Options;
+        let p = Markdown::new(Options::none());
+        // The scan starts at index 5, and the loop condition is checked before
+        // the first increment -- so `<!--->` already has `--` at 3..4 and `>`
+        // at 5, and matches at once. `<!-->` is one byte shorter, so `i < len`
+        // fails immediately and it does not match at all. Measured; my first
+        // guess had both of these at 0.
+        assert_eq!(p.inline_html_comment(b"<!-->"), 0, "too short to reach i=5");
+        assert_eq!(p.inline_html_comment(b"<!--->"), 6, "matches at i=5");
+        assert_eq!(p.inline_html_comment(b"<!---->"), 7);
+        assert_eq!(p.inline_html_comment(b"<!--x-->"), 8);
+        assert_eq!(p.inline_html_comment(b"<!-- x -->"), 10);
+        assert_eq!(p.inline_html_comment(b"<!-- x --"), 0, "no closer");
+        // Stops at the first closer, not the last.
+        assert_eq!(p.inline_html_comment(b"<!-- a --><!-- b -->"), 10);
+    }
+
+    #[test]
+    fn ins_and_del_are_excluded_from_the_html_block_search() {
+        use crate::markdown::Options;
+        // Following original Markdown.pl. Both are in blockTags, but the
+        // closing-tag search is skipped for them, so no block is produced.
+        for tag in ["ins", "del"] {
+            let src = format!("<{tag}>x</{tag}>\n\n");
+            let mut p = Markdown::new(Options::none());
+            assert_eq!(p.html(src.as_bytes(), true), 0, "<{tag}> must not match");
+        }
+        // A comparable tag that is not excluded does match.
+        let mut p = Markdown::new(Options::none());
+        assert!(p.html(b"<div>x</div>\n\n", true) > 0);
     }
 
     #[test]

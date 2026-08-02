@@ -1,0 +1,130 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Measured answers for
+// inlineHTMLComment, htmlComment, html and renderParagraph.
+
+func safeInlineComment(d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New()
+	return fmt.Sprintf("%d", p.inlineHTMLComment(d))
+}
+
+func safeHTMLBlock(d []byte, lax bool) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	var p *Markdown
+	if lax {
+		p = New(WithExtensions(LaxHTMLBlocks))
+	} else {
+		p = New()
+	}
+	n := p.html(d, true)
+	lit := []byte{}
+	if c := p.doc.FirstChild; c != nil {
+		lit = c.Literal
+	}
+	return fmt.Sprintf("%d %s", n, hex.EncodeToString(lit))
+}
+
+func safeRenderPara(d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	p := New()
+	p.renderParagraph(d)
+	kids := 0
+	lit := []byte{}
+	for c := p.doc.FirstChild; c != nil; c = c.Next {
+		kids++
+		if kids == 1 {
+			lit = c.content
+		}
+	}
+	return fmt.Sprintf("%d %s", kids, hex.EncodeToString(lit))
+}
+
+func TestZZGenHTMLBlock(t *testing.T) {
+	f, err := os.Create("htmlblock-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	comments := [][]byte{
+		[]byte(""), []byte("<!--"), []byte("<!---->"), []byte("<!-- x -->"),
+		[]byte("<!-- x --"), []byte("<!--x-->"), []byte("<!-->"), []byte("<!--->"),
+		[]byte("<!--\nmulti\nline\n-->"), []byte("not a comment"),
+		[]byte("<!-- a --><!-- b -->"), []byte("<! -- x -->"),
+	}
+	for _, d := range comments {
+		fmt.Fprintf(f, "I %s %s\n", hex.EncodeToString(d), safeInlineComment(d))
+	}
+
+	blocks := [][]byte{
+		[]byte("<div>\nx\n</div>\n\n"),
+		[]byte("<div>\nx\n</div>\n"),
+		[]byte("<div>\nx\n</div>"),
+		[]byte("<div>x</div>\n\n"),
+		[]byte("<p>x</p>\n\n"),
+		[]byte("<ins>x</ins>\n\n"),
+		[]byte("<del>x</del>\n\n"),
+		[]byte("<notatag>x</notatag>\n\n"),
+		[]byte("<hr>\n\n"),
+		[]byte("<!-- c -->\n\n"),
+		[]byte("plain text\n"),
+		[]byte("<div>\nno closer\n"),
+		[]byte("<div>\n<div>\nnested\n</div>\n</div>\n\n"),
+		[]byte("<table>\n<tr><td>a</td></tr>\n</table>\n\n"),
+		[]byte("<script>\nvar x = 1;\n</script>\n\n"),
+	}
+	for _, d := range blocks {
+		fmt.Fprintf(f, "B %s %s | %s\n", hex.EncodeToString(d),
+			safeHTMLBlock(d, false), safeHTMLBlock(d, true))
+	}
+
+	comments2 := [][]byte{
+		[]byte("<!-- c -->\n\n"), []byte("<!-- c -->\n"), []byte("<!-- c -->"),
+		[]byte("<!-- c -->x\n\n"), []byte("<!--\nm\n-->\n\n"),
+	}
+	for _, d := range comments2 {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(f, "C %s PANIC\n", hex.EncodeToString(d))
+				}
+			}()
+			p := New()
+			n := p.htmlComment(d, true)
+			lit := []byte{}
+			if c := p.doc.FirstChild; c != nil {
+				lit = c.Literal
+			}
+			fmt.Fprintf(f, "C %s %d %s\n", hex.EncodeToString(d), n, hex.EncodeToString(lit))
+		}()
+	}
+
+	paras := [][]byte{
+		[]byte(""), []byte("x"), []byte("x\n"), []byte("  x  \n"),
+		[]byte("   x"), []byte("x  "), []byte("\n"), []byte("  \n"),
+		[]byte("a\nb\n"), []byte("   "),
+	}
+	for _, d := range paras {
+		fmt.Fprintf(f, "P %s %s\n", hex.EncodeToString(d), safeRenderPara(d))
+	}
+}
