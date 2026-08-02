@@ -158,6 +158,314 @@ impl HtmlRenderer {
         out.push(b'>');
         self.last_output_len = 1;
     }
+
+    /// Writes `text`, stripping a leading HTML tag when tag output is
+    /// suppressed.
+    ///
+    /// Ported from `out` (`html.go:388`). See [`html_tag_prefix_len`] for why
+    /// only a *leading* tag is removed.
+    pub(crate) fn out(&mut self, out: &mut Vec<u8>, text: &[u8]) {
+        if self.disable_tags > 0 {
+            match html_tag_prefix_len(text) {
+                Some(n) => out.extend_from_slice(&text[n..]),
+                None => out.extend_from_slice(text),
+            }
+        } else {
+            out.extend_from_slice(text);
+        }
+        // Note this records the length of the *input*, not of what was written,
+        // so a fully stripped tag still counts as output for `cr`'s purposes.
+        self.last_output_len = text.len();
+    }
+
+    /// Writes a newline, unless nothing has been written since the last one.
+    ///
+    /// Ported from `cr` (`html.go:397`).
+    pub(crate) fn cr(&mut self, out: &mut Vec<u8>) {
+        if self.last_output_len > 0 {
+            self.out(out, b"\n");
+        }
+    }
+}
+
+/// Length of an HTML tag at the very start of `data`, or `None`.
+///
+/// Hand-coded from upstream's `htmlTagRe` (`html.go:53`), which is
+/// `(?i)^(?:openTag|closeTag|comment|PI|declaration|CDATA)` built from the
+/// component patterns at `html.go:56-72`. A regex crate would be a large
+/// dependency for one call site, and the grammar is small and closed.
+///
+/// # The `^` anchor is load-bearing
+///
+/// Upstream applies this with `ReplaceAll`, which normally removes *every*
+/// match — but the pattern is anchored, so only a match at offset 0 can ever
+/// qualify. Measured:
+///
+/// ```text
+/// <b>bold</b>          ->  bold</b>        only the leading tag goes
+/// x<b>y                ->  x<b>y           not at offset 0, nothing goes
+/// <b><i>nested</i></b> ->  <i>nested</i></b>
+/// ```
+///
+/// That looks like a bug for a function whose job is stripping tags, and it is
+/// not: [`HtmlRenderer::out`] is called with one node's literal at a time, and
+/// an `HTMLSpan` literal is exactly one tag. So at most one leading tag is ever
+/// present to strip.
+pub(crate) fn html_tag_prefix_len(data: &[u8]) -> Option<usize> {
+    // Alternation order is upstream's, and Go's regexp is leftmost-first, so
+    // the first alternative that matches wins.
+    open_tag_len(data)
+        .or_else(|| close_tag_len(data))
+        .or_else(|| html_comment_len(data))
+        .or_else(|| processing_instruction_len(data))
+        .or_else(|| declaration_len(data))
+        .or_else(|| cdata_len(data))
+}
+
+/// `tagName = [A-Za-z][A-Za-z0-9-]*`
+fn tag_name_len(data: &[u8], i: usize) -> Option<usize> {
+    if i >= data.len() || !data[i].is_ascii_alphabetic() {
+        return None;
+    }
+    let mut j = i + 1;
+    while j < data.len() && (data[j].is_ascii_alphanumeric() || data[j] == b'-') {
+        j += 1;
+    }
+    Some(j - i)
+}
+
+/// `\s*` using Go's regexp whitespace class, not blackfriday's `isspace`.
+fn re_space(data: &[u8], mut i: usize) -> usize {
+    while i < data.len() && matches!(data[i], b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | b' ') {
+        i += 1;
+    }
+    i
+}
+
+/// `attribute = \s+ attributeName attributeValueSpec?`
+fn attribute_len(data: &[u8], i: usize) -> Option<usize> {
+    let after_space = re_space(data, i);
+    if after_space == i {
+        return None; // \s+ needs at least one
+    }
+    let mut j = after_space;
+
+    // attributeName = [a-zA-Z_:][a-zA-Z0-9:._-]*
+    if j >= data.len() || !(data[j].is_ascii_alphabetic() || data[j] == b'_' || data[j] == b':') {
+        return None;
+    }
+    j += 1;
+    while j < data.len()
+        && (data[j].is_ascii_alphanumeric() || matches!(data[j], b':' | b'.' | b'_' | b'-'))
+    {
+        j += 1;
+    }
+
+    // attributeValueSpec = \s*=\s* attributeValue  (optional)
+    let before_eq = j;
+    let k = re_space(data, j);
+    if k < data.len() && data[k] == b'=' {
+        let v = re_space(data, k + 1);
+        if let Some(vlen) = attribute_value_len(data, v) {
+            return Some(v + vlen - i);
+        }
+    }
+    Some(before_eq - i)
+}
+
+/// `attributeValue = unquoted | 'single' | "double"`
+fn attribute_value_len(data: &[u8], i: usize) -> Option<usize> {
+    if i >= data.len() {
+        return None;
+    }
+    // unquotedValue = [^"'=<>`\x00-\x20]+
+    let mut j = i;
+    while j < data.len()
+        && !matches!(data[j], b'"' | b'\'' | b'=' | b'<' | b'>' | b'`')
+        && data[j] > 0x20
+    {
+        j += 1;
+    }
+    if j > i {
+        return Some(j - i);
+    }
+    if data[i] == b'\'' {
+        let mut j = i + 1;
+        while j < data.len() && data[j] != b'\'' {
+            j += 1;
+        }
+        return (j < data.len()).then_some(j + 1 - i);
+    }
+    if data[i] == b'"' {
+        let mut j = i + 1;
+        while j < data.len() && data[j] != b'"' {
+            j += 1;
+        }
+        return (j < data.len()).then_some(j + 1 - i);
+    }
+    None
+}
+
+/// `openTag = < tagName attribute* \s* /? >`
+fn open_tag_len(data: &[u8]) -> Option<usize> {
+    if data.first() != Some(&b'<') {
+        return None;
+    }
+    let mut i = 1 + tag_name_len(data, 1)?;
+    while let Some(n) = attribute_len(data, i) {
+        i += n;
+    }
+    i = re_space(data, i);
+    if i < data.len() && data[i] == b'/' {
+        i += 1;
+    }
+    (i < data.len() && data[i] == b'>').then_some(i + 1)
+}
+
+/// `closeTag = </ tagName \s* >`
+fn close_tag_len(data: &[u8]) -> Option<usize> {
+    if !data.starts_with(b"</") {
+        return None;
+    }
+    let mut i = 2 + tag_name_len(data, 2)?;
+    i = re_space(data, i);
+    (i < data.len() && data[i] == b'>').then_some(i + 1)
+}
+
+/// `htmlComment = <!----> | <!-- (-?[^>-]) (-?[^-])* -->`
+fn html_comment_len(data: &[u8]) -> Option<usize> {
+    if data.starts_with(b"<!---->") {
+        return Some(7);
+    }
+    if !data.starts_with(b"<!--") {
+        return None;
+    }
+    let mut i = 4usize;
+    // (-?[^>-]) : one required unit
+    if i < data.len() && data[i] == b'-' {
+        i += 1;
+    }
+    if i >= data.len() || data[i] == b'>' || data[i] == b'-' {
+        return None;
+    }
+    i += 1;
+    // (-?[^-])* then -->
+    loop {
+        if data[i..].starts_with(b"-->") {
+            return Some(i + 3);
+        }
+        let mut j = i;
+        if j < data.len() && data[j] == b'-' {
+            j += 1;
+        }
+        if j >= data.len() || data[j] == b'-' {
+            return None;
+        }
+        i = j + 1;
+    }
+}
+
+/// `processingInstruction = [<][?].*?[?][>]`
+///
+/// `.` excludes newline in Go's default mode, so a PI cannot span lines.
+fn processing_instruction_len(data: &[u8]) -> Option<usize> {
+    if !data.starts_with(b"<?") {
+        return None;
+    }
+    let mut i = 2usize;
+    while i + 1 < data.len() {
+        if data[i] == b'\n' {
+            return None;
+        }
+        if data[i] == b'?' && data[i + 1] == b'>' {
+            return Some(i + 2);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `declaration = <![A-Z]+ \s+ [^>]* >`, case-insensitive.
+fn declaration_len(data: &[u8]) -> Option<usize> {
+    if !data.starts_with(b"<!") {
+        return None;
+    }
+    let mut i = 2usize;
+    let start = i;
+    while i < data.len() && data[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    let after = re_space(data, i);
+    if after == i {
+        return None; // \s+
+    }
+    i = after;
+    while i < data.len() && data[i] != b'>' {
+        i += 1;
+    }
+    (i < data.len()).then_some(i + 1)
+}
+
+/// `cdata = <!\[CDATA\[[\s\S]*?\]\]>`
+fn cdata_len(data: &[u8]) -> Option<usize> {
+    if !data.starts_with(b"<![CDATA[") {
+        return None;
+    }
+    let mut i = 9usize;
+    while i + 2 < data.len() {
+        if &data[i..i + 3] == b"]]>" {
+            return Some(i + 3);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// URI prefixes [`is_safe_link`] accepts.
+static VALID_URIS: [&[u8]; 4] = [b"http://", b"https://", b"ftp://", b"mailto://"];
+/// Path prefixes [`is_safe_link`] accepts.
+static VALID_PATHS: [&[u8]; 3] = [b"/", b"./", b"../"];
+
+/// Whether a link uses a scheme or path shape considered safe.
+///
+/// Ported from `isSafeLink` (`inline.go`). Note the URI list holds
+/// `mailto://`, with slashes — so an ordinary `mailto:a@b.c` is **not** a safe
+/// link, which is exactly why [`need_skip_link`] tests [`is_mailto`]
+/// separately.
+pub(crate) fn is_safe_link(link: &[u8]) -> bool {
+    for path in VALID_PATHS {
+        if link.len() >= path.len() && &link[..path.len()] == path {
+            // Go writes this as an if / else-if whose arms both return true:
+            // the path either IS the whole link, or is followed by something
+            // alphanumeric.
+            if link.len() == path.len() || crate::util::is_alnum(link[path.len()]) {
+                return true;
+            }
+        }
+    }
+    for prefix in VALID_URIS {
+        // Case-insensitive prefix test, and something alphanumeric must follow.
+        if link.len() > prefix.len()
+            && link[..prefix.len()].eq_ignore_ascii_case(prefix)
+            && crate::util::is_alnum(link[prefix.len()])
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a link should be rendered as plain text rather than an anchor.
+///
+/// Ported from `needSkipLink` (`html.go:310`).
+pub(crate) fn need_skip_link(flags: HtmlFlags, dest: &[u8]) -> bool {
+    if flags.intersects(HtmlFlags::SKIP_LINKS) {
+        return true;
+    }
+    flags.intersects(HtmlFlags::SAFELINK) && !is_safe_link(dest) && !is_mailto(dest)
 }
 
 /// Whether `tag` is an HTML tag named `tagname`.
@@ -565,6 +873,133 @@ mod tests {
             r.params.footnote_return_link_contents.as_bytes(),
             unhex(&d[1])
         );
+    }
+
+    /// Measured Go answers for the tag stripper, safe-link test and out/cr.
+    const OUT_FIXTURE: &str = include_str!("../tests/fixtures/go-out.txt");
+
+    fn out_rows(tag: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+        OUT_FIXTURE.lines().filter_map(move |l| {
+            let f: Vec<String> = l.split(' ').map(str::to_string).collect();
+            (f.first().map(String::as_str) == Some(tag)).then_some(f)
+        })
+    }
+
+    #[test]
+    fn tag_stripping_matches_gos_regexp() {
+        let mut n = 0;
+        for f in out_rows("X") {
+            let input = unhex(&f[1]);
+            let want = unhex(f.get(2).map(String::as_str).unwrap_or(""));
+            let got = match html_tag_prefix_len(&input) {
+                Some(k) => input[k..].to_vec(),
+                None => input.clone(),
+            };
+            assert_eq!(got, want, "stripping {:?}", String::from_utf8_lossy(&input));
+            n += 1;
+        }
+        assert!(n >= 20, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn only_a_leading_tag_is_stripped() {
+        // The anchor, spelled out. This is safe in practice only because `out`
+        // sees one node literal at a time.
+        let strip = |s: &[u8]| match html_tag_prefix_len(s) {
+            Some(k) => s[k..].to_vec(),
+            None => s.to_vec(),
+        };
+        assert_eq!(strip(b"<b>bold</b>"), b"bold</b>");
+        assert_eq!(strip(b"x<b>y"), b"x<b>y", "not at offset 0");
+        assert_eq!(strip(b"<b><i>n</i></b>"), b"<i>n</i></b>");
+        assert_eq!(strip(b"<b>"), b"");
+    }
+
+    #[test]
+    fn is_safe_link_matches_go() {
+        let mut n = 0;
+        for f in out_rows("S") {
+            let link = unhex(&f[1]);
+            assert_eq!(
+                is_safe_link(&link),
+                f[2] == "true",
+                "is_safe_link({:?})",
+                String::from_utf8_lossy(&link)
+            );
+            n += 1;
+        }
+        assert!(n >= 15, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn plain_mailto_is_not_a_safe_link() {
+        // validUris holds "mailto://", with slashes, so a normal mailto: URL
+        // fails is_safe_link -- which is why need_skip_link tests is_mailto
+        // separately rather than relying on it.
+        assert!(!is_safe_link(b"mailto:a@b.c"));
+        assert!(is_mailto(b"mailto:a@b.c"));
+        assert!(!need_skip_link(HtmlFlags::SAFELINK, b"mailto:a@b.c"));
+    }
+
+    #[test]
+    fn need_skip_link_matches_go() {
+        let mut n = 0;
+        for f in out_rows("N") {
+            let flags = HtmlFlags::from_bits_retain(f[1].parse().unwrap());
+            let link = unhex(&f[2]);
+            assert_eq!(
+                need_skip_link(flags, &link),
+                f[3] == "true",
+                "need_skip_link({flags:?}, {:?})",
+                String::from_utf8_lossy(&link)
+            );
+            n += 1;
+        }
+        assert!(n >= 50, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn out_and_cr_match_go() {
+        // The fixture records the buffer and last_output_len for a few write
+        // sequences, including the disable_tags path.
+        let cases: [(i32, &[&str]); 6] = [
+            (0, &["a", "b"]),
+            (0, &["", "a"]),
+            (0, &["a", ""]),
+            (1, &["<b>x</b>"]),
+            (1, &["plain"]),
+            (0, &["<b>x</b>"]),
+        ];
+        let rows: Vec<Vec<String>> = out_rows("O").collect();
+        assert_eq!(rows.len(), cases.len());
+        for (row, (disable, writes)) in rows.iter().zip(cases.iter()) {
+            let mut r = renderer(HtmlFlags::NONE);
+            r.disable_tags = *disable;
+            let mut buf = Vec::new();
+            for w in *writes {
+                r.out(&mut buf, w.as_bytes());
+            }
+            let len_after_out = r.last_output_len;
+            r.cr(&mut buf);
+            assert_eq!(buf, unhex(&row[3]), "buffer for case {}", row[1]);
+            assert_eq!(
+                len_after_out,
+                row[4].parse::<usize>().unwrap(),
+                "last_output_len for case {}",
+                row[1]
+            );
+        }
+    }
+
+    #[test]
+    fn cr_writes_nothing_on_a_fresh_renderer() {
+        let f = out_rows("C").next().unwrap();
+        let mut r = renderer(HtmlFlags::NONE);
+        let mut buf = Vec::new();
+        r.cr(&mut buf);
+        assert_eq!(buf, unhex(&f[1]));
+        assert!(buf.is_empty());
+        assert_eq!(r.last_output_len, f[2].parse::<usize>().unwrap());
     }
 
     #[test]

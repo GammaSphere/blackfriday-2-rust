@@ -1,0 +1,91 @@
+package blackfriday
+
+import (
+	"bytes"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Measures what
+// htmlTagRe.ReplaceAll actually strips, plus isSafeLink / needSkipLink and the
+// out/cr output primitives.
+//
+// The regexp is anchored with ^, so how many matches ReplaceAll removes is not
+// obvious from reading it; this settles the question rather than guessing.
+
+func TestZZGenOut(t *testing.T) {
+	f, err := os.Create("out-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "# pattern=%s\n", htmlTagRe.String())
+
+	strips := []string{
+		"", "plain text", "<b>bold</b>", "<b>", "</b>", "x<b>y",
+		"<b>a</b><i>c</i>", "<br/>", "<br />", "<img src='x'>",
+		"<img src=\"a>b\">", "<div class=x id=y>", "<!-- c -->",
+		"<!---->", "<![CDATA[x]]>", "<?php ?>", "<!DOCTYPE html>",
+		"<B>upper</B>", "< b>", "<1>", "<a-b>", "<a_b>",
+		"<b>one</b> two <i>three</i>",
+		"no tags at all",
+		"<b><i>nested</i></b>",
+	}
+	for _, s := range strips {
+		fmt.Fprintf(f, "X %s %s\n", hex.EncodeToString([]byte(s)),
+			hex.EncodeToString(htmlTagRe.ReplaceAll([]byte(s), []byte{})))
+	}
+
+	links := []string{
+		"", "http://x.com", "https://x.com", "ftp://x.com", "mailto:a@b.c",
+		"javascript:alert(1)", "/rel", "#frag", "./x", "data:text/html,x",
+		"HTTP://X.COM", "http:", "http://", "tel:123", "irc://x",
+		"/relative/path", "relative", "http://x.com/a?b=c",
+	}
+	for _, l := range links {
+		fmt.Fprintf(f, "S %s %v\n", hex.EncodeToString([]byte(l)), isSafeLink([]byte(l)))
+	}
+
+	for _, fl := range []HTMLFlags{0, SkipLinks, Safelink, SkipLinks | Safelink} {
+		for _, l := range links {
+			fmt.Fprintf(f, "N %d %s %v\n", int(fl), hex.EncodeToString([]byte(l)),
+				needSkipLink(fl, []byte(l)))
+		}
+	}
+
+	// out() and cr() behaviour, including the disableTags path.
+	type outCase struct {
+		disable int
+		writes  []string
+	}
+	cases := []outCase{
+		{0, []string{"a", "b"}},
+		{0, []string{"", "a"}},
+		{0, []string{"a", ""}},
+		{1, []string{"<b>x</b>"}},
+		{1, []string{"plain"}},
+		{0, []string{"<b>x</b>"}},
+	}
+	for ci, c := range cases {
+		var buf bytes.Buffer
+		r := NewHTMLRenderer(HTMLRendererParameters{})
+		r.disableTags = c.disable
+		for _, w := range c.writes {
+			r.out(&buf, []byte(w))
+		}
+		lenAfterOut := r.lastOutputLen
+		r.cr(&buf)
+		fmt.Fprintf(f, "O %d %d %s %d %s\n", ci, c.disable,
+			hex.EncodeToString(buf.Bytes()), lenAfterOut,
+			hex.EncodeToString([]byte(fmt.Sprintf("%d", r.lastOutputLen))))
+	}
+
+	// cr on a fresh renderer writes nothing
+	var buf bytes.Buffer
+	r := NewHTMLRenderer(HTMLRendererParameters{})
+	r.cr(&buf)
+	fmt.Fprintf(f, "C %s %d\n", hex.EncodeToString(buf.Bytes()), r.lastOutputLen)
+}
