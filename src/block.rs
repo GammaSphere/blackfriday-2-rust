@@ -23,11 +23,6 @@
 //! public `Run` entry point is a separate question, left to the differential
 //! fuzzing stage.
 
-// The scanners below are crate-internal and are driven by the `block`
-// dispatcher, which lands with the rest of the block constructs. Until then
-// only the tests reach them. Removed once `run` wires the pipeline together.
-#![allow(dead_code)]
-
 use crate::markdown::Markdown;
 use crate::node::{Arena, NodeId, NodeType};
 use crate::unicode_tables::{is_letter_or_number, simple_to_lower};

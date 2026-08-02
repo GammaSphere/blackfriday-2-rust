@@ -52,4 +52,5 @@ pub mod util;
 pub use flags::{
     CellAlignFlags, Extensions, HtmlFlags, ListType, TAB_SIZE_DEFAULT, TAB_SIZE_DOUBLE, VERSION,
 };
+pub use markdown::{run, run_with, Markdown, Options, RefOverride, Reference, Renderer};
 pub use node::{Arena, Node, NodeId, NodeType, WalkStatus, Walker};

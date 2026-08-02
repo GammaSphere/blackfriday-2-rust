@@ -18,12 +18,10 @@
 //! reasoning is recorded at each function. Both are checked against the real
 //! `regexp` output rather than against that reasoning.
 
-// Nothing outside the crate can reach the inline parser until the `run` entry
-// point lands, so rustc sees these as unused. The allow comes off with `run`,
-// as it does in `block` and `html`.
-#![allow(dead_code)]
-
-use crate::util::{is_alnum, is_space};
+use crate::flags::Extensions;
+use crate::markdown::{InternalReference, Markdown};
+use crate::node::{NodeId, NodeType};
+use crate::util::{is_alnum, is_letter, is_punct, is_space};
 
 /// The characters a backslash may escape.
 ///
@@ -539,6 +537,970 @@ fn anchor_close(data: &[u8], mut i: usize) -> Option<usize> {
 /// like upstream's and a future fix has somewhere to go.
 pub(crate) fn normalize_uri(s: &[u8]) -> Vec<u8> {
     s.to_vec()
+}
+
+/// One inline handler.
+///
+/// Ported from `inlineParser` (`markdown.go:105`). Upstream's handlers take the
+/// parser explicitly rather than closing over it, so these are plain function
+/// pointers — unlike smartypants, no tag enum is needed.
+pub(crate) type InlineParser = fn(&mut Markdown, &[u8], usize) -> (usize, Option<NodeId>);
+
+/// Builds the dispatch table for an extension set.
+///
+/// Ported from the registration block in `New` (`markdown.go:285`).
+pub(crate) fn callbacks(extensions: Extensions) -> [Option<InlineParser>; 256] {
+    let mut cb: [Option<InlineParser>; 256] = [None; 256];
+    cb[b' ' as usize] = Some(maybe_line_break as InlineParser);
+    cb[b'*' as usize] = Some(emphasis as InlineParser);
+    cb[b'_' as usize] = Some(emphasis as InlineParser);
+    if extensions.intersects(Extensions::STRIKETHROUGH) {
+        cb[b'~' as usize] = Some(emphasis as InlineParser);
+    }
+    cb[b'`' as usize] = Some(code_span as InlineParser);
+    cb[b'\n' as usize] = Some(line_break as InlineParser);
+    cb[b'[' as usize] = Some(link as InlineParser);
+    cb[b'<' as usize] = Some(left_angle as InlineParser);
+    cb[b'\\' as usize] = Some(escape as InlineParser);
+    cb[b'&' as usize] = Some(entity as InlineParser);
+    cb[b'!' as usize] = Some(maybe_image as InlineParser);
+    cb[b'^' as usize] = Some(maybe_inline_footnote as InlineParser);
+    if extensions.intersects(Extensions::AUTOLINK) {
+        for c in *b"hmfHMF" {
+            cb[c as usize] = Some(maybe_auto_link as InlineParser);
+        }
+    }
+    cb
+}
+
+/// Creates a `Text` node holding `s`.
+///
+/// Ported from `text` (`inline.go:1220`).
+fn text_node(p: &mut Markdown, s: &[u8]) -> NodeId {
+    let node = p.arena.new_node(NodeType::Text);
+    p.arena.get_mut(node).literal = s.to_vec();
+    node
+}
+
+/// Creates a childless node of `node_type`.
+fn bare_node(p: &mut Markdown, node_type: NodeType) -> NodeId {
+    p.arena.new_node(node_type)
+}
+
+impl Markdown {
+    /// Parses `data` as inline content, appending children to `curr_block`.
+    ///
+    /// Ported from `inline` (`inline.go:49`).
+    ///
+    /// Two details are load-bearing. A `Text` node is appended for the run
+    /// before each match **even when that run is empty**, so the tree carries
+    /// zero-length text nodes; and the trailing run drops a final newline. Both
+    /// show up in a tree comparison even though neither changes the HTML.
+    pub(crate) fn inline(&mut self, curr_block: NodeId, data: &[u8]) {
+        // Handlers recurse into this, so the depth is capped.
+        if self.nesting >= self.max_nesting || data.is_empty() {
+            return;
+        }
+        self.nesting += 1;
+
+        let (mut beg, mut end) = (0usize, 0usize);
+        while end < data.len() {
+            match self.inline_callback[data[end] as usize] {
+                Some(handler) => {
+                    let (consumed, node) = handler(self, data, end);
+                    if consumed == 0 {
+                        // The handler declined.
+                        end += 1;
+                    } else {
+                        let t = text_node(self, &data[beg..end]);
+                        self.arena.append_child(curr_block, t);
+                        if let Some(n) = node {
+                            self.arena.append_child(curr_block, n);
+                        }
+                        // Skip past whatever the handler used.
+                        beg = end + consumed;
+                        end = beg;
+                    }
+                }
+                None => end += 1,
+            }
+        }
+
+        if beg < data.len() {
+            if data[end - 1] == b'\n' {
+                end -= 1;
+            }
+            let t = text_node(self, &data[beg..end]);
+            self.arena.append_child(curr_block, t);
+        }
+
+        self.nesting -= 1;
+    }
+}
+
+/// `*`, `_` and `~`: single, double or triple emphasis.
+///
+/// Ported from `emphasis` (`inline.go:86`).
+fn emphasis(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    let data = &data[offset..];
+    let c = data[0];
+
+    if data.len() > 2 && data[1] != c {
+        // Whitespace cannot follow an opening delimiter, and strikethrough
+        // only exists in its doubled form.
+        if c == b'~' || is_space(data[1]) {
+            return (0, None);
+        }
+        let (ret, node) = helper_emphasis(p, &data[1..], c);
+        if ret == 0 {
+            return (0, None);
+        }
+        return (ret + 1, node);
+    }
+
+    if data.len() > 3 && data[1] == c && data[2] != c {
+        if is_space(data[2]) {
+            return (0, None);
+        }
+        let (ret, node) = helper_double_emphasis(p, &data[2..], c);
+        if ret == 0 {
+            return (0, None);
+        }
+        return (ret + 2, node);
+    }
+
+    if data.len() > 4 && data[1] == c && data[2] == c && data[3] != c {
+        if c == b'~' || is_space(data[3]) {
+            return (0, None);
+        }
+        let (ret, node) = helper_triple_emphasis(p, data, 3, c);
+        if ret == 0 {
+            return (0, None);
+        }
+        return (ret + 3, node);
+    }
+
+    (0, None)
+}
+
+/// `` ` ``: an inline code span.
+///
+/// Ported from `codeSpan` (`inline.go:131`). A span whose contents are all
+/// spaces is consumed but produces no node.
+fn code_span(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    let data = &data[offset..];
+
+    let mut nb = 0;
+    while nb < data.len() && data[nb] == b'`' {
+        nb += 1;
+    }
+
+    // Find a run of the same length.
+    let mut i = 0;
+    let mut end = nb;
+    while end < data.len() && i < nb {
+        if data[end] == b'`' {
+            i += 1;
+        } else {
+            i = 0;
+        }
+        end += 1;
+    }
+
+    if i < nb && end >= data.len() {
+        return (0, None);
+    }
+
+    let mut f_begin = nb;
+    while f_begin < end && data[f_begin] == b' ' {
+        f_begin += 1;
+    }
+
+    let mut f_end = end - nb;
+    while f_end > f_begin && data[f_end - 1] == b' ' {
+        f_end -= 1;
+    }
+
+    if f_begin != f_end {
+        let code = bare_node(p, NodeType::Code);
+        p.arena.get_mut(code).literal = data[f_begin..f_end].to_vec();
+        return (end, Some(code));
+    }
+
+    (end, None)
+}
+
+/// ` `: a newline preceded by two spaces becomes `<br>`.
+///
+/// Ported from `maybeLineBreak` (`inline.go:178`). A single trailing space
+/// before a newline is consumed without producing anything, which is how the
+/// space disappears from the output.
+fn maybe_line_break(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    let orig_offset = offset;
+    let mut offset = offset;
+    while offset < data.len() && data[offset] == b' ' {
+        offset += 1;
+    }
+
+    if offset < data.len() && data[offset] == b'\n' {
+        if offset - orig_offset >= 2 {
+            let br = bare_node(p, NodeType::Hardbreak);
+            return (offset - orig_offset + 1, Some(br));
+        }
+        return (offset - orig_offset, None);
+    }
+    (0, None)
+}
+
+/// `\n`: a break in its own right when `HARD_LINE_BREAK` is set.
+///
+/// Ported from `lineBreak` (`inline.go:194`).
+fn line_break(p: &mut Markdown, _data: &[u8], _offset: usize) -> (usize, Option<NodeId>) {
+    if p.extensions.intersects(Extensions::HARD_LINE_BREAK) {
+        let br = bare_node(p, NodeType::Hardbreak);
+        return (1, Some(br));
+    }
+    (0, None)
+}
+
+/// Which of the four bracketed constructs is being parsed.
+///
+/// Ported from `linkType` (`inline.go:201`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LinkType {
+    /// `[text](url)` or `[text][ref]`.
+    Normal,
+    /// `![alt](url)`.
+    Img,
+    /// `[^id]`, defined elsewhere in the document.
+    DeferredFootnote,
+    /// `^[text]`, defined where it is used.
+    InlineFootnote,
+}
+
+/// Whether a `[…]` at `pos` opens a reference rather than a footnote.
+///
+/// Ported from `isReferenceStyleLink` (`inline.go:210`).
+fn is_reference_style_link(data: &[u8], pos: usize, t: LinkType) -> bool {
+    if t == LinkType::DeferredFootnote {
+        return false;
+    }
+    pos + 1 < data.len() && data[pos] == b'[' && data[pos + 1] != b'^'
+}
+
+/// `!`: an image, when a bracket follows.
+///
+/// Ported from `maybeImage` (`inline.go:217`).
+fn maybe_image(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    if offset + 1 < data.len() && data[offset + 1] == b'[' {
+        return link(p, data, offset);
+    }
+    (0, None)
+}
+
+/// `^`: an inline footnote, when a bracket follows.
+///
+/// Ported from `maybeInlineFootnote` (`inline.go:224`). Note it does not check
+/// the `Footnotes` extension; `link` decides, and without the extension the
+/// caret is treated as ordinary text by falling through to a normal link.
+fn maybe_inline_footnote(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    if offset + 1 < data.len() && data[offset + 1] == b'[' {
+        return link(p, data, offset);
+    }
+    (0, None)
+}
+
+/// `[`, and the entry point for images and footnotes.
+///
+/// Ported from `link` (`inline.go:232`), the longest function in the file.
+#[allow(clippy::too_many_lines)]
+fn link(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    // No links inside links, footnotes or deferred footnotes.
+    if p.inside_link
+        && ((offset > 0 && data[offset - 1] == b'[')
+            || (offset + 1 < data.len() && data[offset + 1] == b'^'))
+    {
+        return (0, None);
+    }
+
+    let mut offset = offset;
+    let footnotes = p.extensions.intersects(Extensions::FOOTNOTES);
+    let t = if footnotes && offset + 1 < data.len() && data[offset + 1] == b'^' {
+        // `![^text]` is a deferred footnote following an exclamation mark.
+        LinkType::DeferredFootnote
+    } else if data[offset] == b'!' {
+        offset += 1;
+        LinkType::Img
+    } else if footnotes {
+        if data[offset] == b'^' {
+            offset += 1;
+            LinkType::InlineFootnote
+        } else {
+            // Upstream's second arm here repeats the first case's condition
+            // and so can never be taken; the zero value of linkType wins.
+            LinkType::Normal
+        }
+    } else {
+        LinkType::Normal
+    };
+
+    let data = &data[offset..];
+
+    let mut i = 1;
+    let mut note_id: i32 = 0;
+    // Go leaves this nil until something assigns it, and the renderer's
+    // Image arm tests it against nil rather than against its length -- so an
+    // empty-but-present title emits `title=""` and an absent one emits
+    // nothing. Vec<u8> cannot hold that distinction; Option<Vec<u8>> can.
+    let mut title: Option<Vec<u8>> = None;
+    let mut link_dest: Vec<u8> = Vec::new();
+    let mut alt_content: Vec<u8> = Vec::new();
+    let mut text_has_nl = false;
+
+    if t == LinkType::DeferredFootnote {
+        i += 1;
+    }
+
+    // Find the matching close bracket.
+    let mut level = 1i32;
+    while level > 0 && i < data.len() {
+        if data[i] == b'\n' {
+            text_has_nl = true;
+        } else if crate::block::is_backslash_escaped(data, i) {
+            // Upstream `continue`s, which in a Go for-loop still runs the
+            // post statement, so this arm does nothing at all.
+        } else if data[i] == b'[' {
+            level += 1;
+        } else if data[i] == b']' {
+            level -= 1;
+            if level <= 0 {
+                i -= 1; // compensate for the increment below
+            }
+        }
+        i += 1;
+    }
+
+    if i >= data.len() {
+        return (0, None);
+    }
+
+    let txt_e = i;
+    i += 1;
+    let mut footnote_node: Option<NodeId> = None;
+
+    // Skip any run of whitespace, which is far more lax than Markdown's
+    // original syntax allows.
+    while i < data.len() && is_space(data[i]) {
+        i += 1;
+    }
+
+    if i < data.len() && data[i] == b'(' {
+        // Inline style: [text](url "title")
+        i += 1;
+
+        while i < data.len() && is_space(data[i]) {
+            i += 1;
+        }
+
+        let link_b = i;
+
+        // Scan to ' " or )
+        while i < data.len() {
+            if data[i] == b'\\' {
+                i += 2;
+            } else if data[i] == b')' || data[i] == b'\'' || data[i] == b'"' {
+                break;
+            } else {
+                i += 1;
+            }
+        }
+
+        if i >= data.len() {
+            return (0, None);
+        }
+        let mut link_e = i;
+
+        // The title, if there is one.
+        let (mut title_b, mut title_e) = (0usize, 0usize);
+        if data[i] == b'\'' || data[i] == b'"' {
+            i += 1;
+            title_b = i;
+
+            while i < data.len() {
+                if data[i] == b'\\' {
+                    i += 2;
+                } else if data[i] == b')' {
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+
+            if i >= data.len() {
+                return (0, None);
+            }
+
+            title_e = i - 1;
+            while title_e > title_b && is_space(data[title_e]) {
+                title_e -= 1;
+            }
+
+            // Without a closing quote there was no title after all.
+            if data[title_e] != b'\'' && data[title_e] != b'"' {
+                title_b = 0;
+                title_e = 0;
+                link_e = i;
+            }
+        }
+
+        while link_e > link_b && is_space(data[link_e - 1]) {
+            link_e -= 1;
+        }
+
+        // Optional angle brackets around the destination.
+        let mut link_b = link_b;
+        if data[link_b] == b'<' {
+            link_b += 1;
+        }
+        if data[link_e - 1] == b'>' {
+            link_e -= 1;
+        }
+
+        if link_e > link_b {
+            link_dest = data[link_b..link_e].to_vec();
+        }
+
+        if title_e > title_b {
+            title = Some(data[title_b..title_e].to_vec());
+        }
+
+        i += 1;
+    } else if is_reference_style_link(data, i, t) {
+        // Reference style: [text][id]
+        let mut alt_content_considered = false;
+
+        i += 1;
+        let link_b = i;
+        while i < data.len() && data[i] != b']' {
+            i += 1;
+        }
+        if i >= data.len() {
+            return (0, None);
+        }
+        let link_e = i;
+
+        let id: Vec<u8> = if link_b == link_e {
+            if text_has_nl {
+                collapse_newlines(data, txt_e, 1)
+            } else {
+                alt_content_considered = true;
+                data[1..txt_e].to_vec()
+            }
+        } else {
+            data[link_b..link_e].to_vec()
+        };
+
+        let Some(lr) = p.get_ref(&String::from_utf8_lossy(&id)) else {
+            return (0, None);
+        };
+
+        link_dest = lr.link;
+        title = Some(lr.title);
+        if alt_content_considered {
+            alt_content = lr.text;
+        }
+        i += 1;
+    } else {
+        // Shortcut reference, deferred footnote, or inline footnote.
+        let id: Vec<u8> = if text_has_nl {
+            collapse_newlines(data, txt_e, 1)
+        } else if t == LinkType::DeferredFootnote {
+            data[2..txt_e].to_vec() // drop the '^'
+        } else {
+            data[1..txt_e].to_vec()
+        };
+
+        let fnode = bare_node(p, NodeType::Item);
+        footnote_node = Some(fnode);
+
+        if t == LinkType::InlineFootnote {
+            note_id = p.notes.len() as i32 + 1;
+
+            // The anchor is the slug, truncated to sixteen bytes -- note that
+            // upstream sizes the buffer from the *id* and then copies the
+            // slug into it, so a slug longer than the id is cut short and a
+            // shorter one leaves trailing NULs.
+            let fragment: Vec<u8> = if !id.is_empty() {
+                let n = if id.len() < 16 { id.len() } else { 16 };
+                let mut frag = vec![0u8; n];
+                let slug = crate::util::slugify(&id);
+                let copied = n.min(slug.len());
+                frag[..copied].copy_from_slice(&slug[..copied]);
+                frag
+            } else {
+                format!("footnote-{note_id}").into_bytes()
+            };
+
+            let r = InternalReference {
+                note_id,
+                has_block: false,
+                link: fragment,
+                title: id,
+                footnote: Some(fnode),
+                text: Vec::new(),
+            };
+
+            link_dest = r.link.clone();
+            title = Some(r.title.clone());
+            p.notes.push(r);
+        } else {
+            let key = String::from_utf8_lossy(&id).into_owned();
+            let Some((mut lr, from_table)) = p.get_ref_owned(&key) else {
+                return (0, None);
+            };
+
+            if t == LinkType::DeferredFootnote {
+                lr.note_id = p.notes.len() as i32 + 1;
+                lr.footnote = Some(fnode);
+                p.notes.push(lr.clone());
+                // Go held a pointer into p.refs, so this assignment is visible
+                // to every later lookup of the same id. A reference the
+                // override callback invented is freshly built each call and
+                // has nowhere to be written back to.
+                if from_table {
+                    p.put_ref(&key, lr.clone());
+                }
+            }
+
+            link_dest = lr.link;
+            // For a footnote the title holds the note's contents.
+            title = Some(lr.title);
+            note_id = lr.note_id;
+        }
+
+        // Rewind over the whitespace skipped above.
+        i = txt_e + 1;
+    }
+
+    let mut u_link: Vec<u8> = Vec::new();
+    if t == LinkType::Normal || t == LinkType::Img {
+        if !link_dest.is_empty() {
+            unescape_text(&mut u_link, &link_dest);
+        }
+
+        // A link needs something to click on and somewhere to go.
+        if u_link.is_empty() || (t == LinkType::Normal && txt_e <= 1) {
+            return (0, None);
+        }
+    }
+
+    let link_node = match t {
+        LinkType::Normal => {
+            let node = bare_node(p, NodeType::Link);
+            p.arena.get_mut(node).link.destination = normalize_uri(&u_link);
+            p.arena.get_mut(node).link.title = title;
+            if !alt_content.is_empty() {
+                let t = text_node(p, &alt_content);
+                p.arena.append_child(node, t);
+            } else {
+                // Links cannot nest, so turn link parsing off and recurse.
+                let inside_link = p.inside_link;
+                p.inside_link = true;
+                let inner = data[1..txt_e].to_vec();
+                p.inline(node, &inner);
+                p.inside_link = inside_link;
+            }
+            node
+        }
+        LinkType::Img => {
+            let node = bare_node(p, NodeType::Image);
+            p.arena.get_mut(node).link.destination = u_link;
+            p.arena.get_mut(node).link.title = title;
+            let alt = data[1..txt_e].to_vec();
+            let t = text_node(p, &alt);
+            p.arena.append_child(node, t);
+            i += 1;
+            node
+        }
+        LinkType::InlineFootnote | LinkType::DeferredFootnote => {
+            let node = bare_node(p, NodeType::Link);
+            p.arena.get_mut(node).link.destination = link_dest;
+            p.arena.get_mut(node).link.title = title;
+            p.arena.get_mut(node).link.note_id = note_id;
+            p.arena.get_mut(node).link.footnote = footnote_node;
+            if t == LinkType::InlineFootnote {
+                i += 1;
+            }
+            node
+        }
+    };
+
+    (i, Some(link_node))
+}
+
+/// Builds a reference id from link text that spans lines.
+///
+/// The body of upstream's two identical inline loops: copy every byte, turning
+/// each newline into a single space unless a space already precedes it.
+fn collapse_newlines(data: &[u8], txt_e: usize, from: usize) -> Vec<u8> {
+    let mut b = Vec::new();
+    for j in from..txt_e {
+        if data[j] != b'\n' {
+            b.push(data[j]);
+        } else if data[j - 1] != b' ' {
+            b.push(b' ');
+        }
+    }
+    b
+}
+
+/// `<`: an HTML tag or an autolink.
+///
+/// Ported from `leftAngle` (`inline.go:630`).
+fn left_angle(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    let data = &data[offset..];
+    let (altype, mut end) = tag_length(data);
+    let size = p.inline_html_comment(data);
+    if size > 0 {
+        end = size;
+    }
+    if end > 2 {
+        if altype != AutolinkType::NotAutolink {
+            let mut u_link = Vec::new();
+            unescape_text(&mut u_link, &data[1..end - 1]);
+            if !u_link.is_empty() {
+                let node = bare_node(p, NodeType::Link);
+                let destination = if altype == AutolinkType::EmailAutolink {
+                    let mut d = b"mailto:".to_vec();
+                    d.extend_from_slice(&u_link);
+                    d
+                } else {
+                    u_link.clone()
+                };
+                p.arena.get_mut(node).link.destination = destination;
+                let t = text_node(p, strip_mailto(&u_link));
+                p.arena.append_child(node, t);
+                return (end, Some(node));
+            }
+        } else {
+            let html_tag = bare_node(p, NodeType::HTMLSpan);
+            p.arena.get_mut(html_tag).literal = data[..end].to_vec();
+            return (end, Some(html_tag));
+        }
+    }
+
+    (end, None)
+}
+
+/// `\`: a backslash escape.
+///
+/// Ported from `escape` (`inline.go:663`). A trailing lone backslash reports
+/// two bytes consumed even though only one exists, which pushes the caller's
+/// cursor past the end and ends the scan.
+fn escape(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    let data = &data[offset..];
+
+    if data.len() > 1 {
+        if p.extensions.intersects(Extensions::BACKSLASH_LINE_BREAK) && data[1] == b'\n' {
+            let br = bare_node(p, NodeType::Hardbreak);
+            return (2, Some(br));
+        }
+        if !ESCAPE_CHARS.contains(&data[1]) {
+            return (0, None);
+        }
+
+        let t = text_node(p, &data[1..2]);
+        return (2, Some(t));
+    }
+
+    (2, None)
+}
+
+/// `&`: an entity, or a lone ampersand.
+///
+/// Ported from `entity` (`inline.go:703`). `&amp;` is collapsed back to a bare
+/// `&` so the renderer's escaper does not turn it into `&amp;amp;`.
+fn entity(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    let data = &data[offset..];
+
+    let mut end = 1;
+
+    if end < data.len() && data[end] == b'#' {
+        end += 1;
+    }
+
+    while end < data.len() && is_alnum(data[end]) {
+        end += 1;
+    }
+
+    if end < data.len() && data[end] == b';' {
+        end += 1; // a real entity
+    } else {
+        return (0, None); // a lone '&'
+    }
+
+    let ent: &[u8] = if &data[..end] == b"&amp;" {
+        b"&"
+    } else {
+        &data[..end]
+    };
+
+    let t = text_node(p, ent);
+    (end, Some(t))
+}
+
+/// `h`, `m`, `f` and their capitals: a bare URL, when one of the protocols
+/// matches.
+///
+/// Ported from `maybeAutoLink` (`inline.go:765`).
+fn maybe_auto_link(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    /// The protocols a bare URL may start with.
+    const PROTOCOL_PREFIXES: [&[u8]; 5] =
+        [b"http://", b"https://", b"ftp://", b"file://", b"mailto:"];
+    /// `len("ftp://")`, the shortest of them.
+    const SHORTEST_PREFIX: usize = 6;
+
+    // A cheap test first, to rule out most bytes.
+    if p.inside_link || data.len() < offset + SHORTEST_PREFIX {
+        return (0, None);
+    }
+    for prefix in PROTOCOL_PREFIXES {
+        // 8 is the length of the longest prefix.
+        let end_of_head = (offset + 8).min(data.len());
+        if has_prefix_case_insensitive(&data[offset..end_of_head], prefix) {
+            return auto_link(p, data, offset);
+        }
+    }
+    (0, None)
+}
+
+/// Extends a bare URL backwards and forwards, and decides where it ends.
+///
+/// Ported from `autoLink` (`inline.go:782`).
+fn auto_link(p: &mut Markdown, data: &[u8], offset: usize) -> (usize, Option<NodeId>) {
+    // A more expensive check that this is not already inside an anchor.
+    let mut anchor_start = offset;
+    let mut offset_from_anchor = 0;
+    while anchor_start > 0 && data[anchor_start] != b'<' {
+        anchor_start -= 1;
+        offset_from_anchor += 1;
+    }
+
+    if let Some(len) = anchor_match_len(&data[anchor_start..]) {
+        let anchor_str = &data[anchor_start..anchor_start + len];
+        let anchor_close = bare_node(p, NodeType::HTMLSpan);
+        p.arena.get_mut(anchor_close).literal = anchor_str[offset_from_anchor..].to_vec();
+        return (anchor_str.len() - offset_from_anchor, Some(anchor_close));
+    }
+
+    // Scan back to a word boundary.
+    let mut rewind = 0;
+    while offset - rewind > 0 && rewind <= 7 && is_letter(data[offset - rewind - 1]) {
+        rewind += 1;
+    }
+    if rewind > 6 {
+        // The longest protocol understood is "mailto", six letters.
+        return (0, None);
+    }
+
+    let orig_data = data;
+    let data = &data[offset - rewind..];
+
+    if !crate::html::is_safe_link(data) {
+        return (0, None);
+    }
+
+    let mut link_end = 0;
+    while link_end < data.len() && !is_end_of_link(data[link_end]) {
+        link_end += 1;
+    }
+
+    // Trailing punctuation is usually not part of the URL.
+    if (data[link_end - 1] == b'.' || data[link_end - 1] == b',') && data[link_end - 2] != b'\\' {
+        link_end -= 1;
+    }
+
+    // A semicolon may be the tail of an entity, though.
+    if data[link_end - 1] == b';'
+        && data[link_end - 2] != b'\\'
+        && !link_ends_with_entity(data, link_end)
+    {
+        link_end -= 1;
+    }
+
+    // A closing bracket counts only if its opener is inside the URL. Upstream
+    // spells the four cases out at length; the point is that
+    // `http://x/Pikachu_(Electric)` keeps its parenthesis but
+    // `(see http://x/page)` does not.
+    let copen = match data[link_end - 1] {
+        b'"' => b'"',
+        b'\'' => b'\'',
+        b')' => b'(',
+        b']' => b'[',
+        b'}' => b'{',
+        _ => 0,
+    };
+
+    if copen != 0 {
+        // Go's bufEnd is a signed int and the loop relies on it going
+        // negative, so this has to be signed too. It cannot run off the top:
+        // `data` is `orig_data[offset - rewind..]` and `link_end <= data.len()`.
+        let mut buf_end = (offset - rewind + link_end) as isize - 2;
+        let mut open_delim = 1;
+
+        while buf_end >= 0 && orig_data[buf_end as usize] != b'\n' && open_delim != 0 {
+            if orig_data[buf_end as usize] == data[link_end - 1] {
+                open_delim += 1;
+            }
+
+            if orig_data[buf_end as usize] == copen {
+                open_delim -= 1;
+            }
+
+            buf_end -= 1;
+        }
+
+        if open_delim == 0 {
+            link_end -= 1;
+        }
+    }
+
+    let mut u_link = Vec::new();
+    unescape_text(&mut u_link, &data[..link_end]);
+
+    if !u_link.is_empty() {
+        let node = bare_node(p, NodeType::Link);
+        p.arena.get_mut(node).link.destination = u_link.clone();
+        let t = text_node(p, &u_link);
+        p.arena.append_child(node, t);
+        return (link_end, Some(node));
+    }
+
+    (link_end, None)
+}
+
+/// Single emphasis, `<em>`.
+///
+/// Ported from `helperEmphasis` (`inline.go:1112`).
+fn helper_emphasis(p: &mut Markdown, data: &[u8], c: u8) -> (usize, Option<NodeId>) {
+    let mut i = 0;
+
+    // Skip one symbol when this was reached from the triple-emphasis path.
+    if data.len() > 1 && data[0] == c && data[1] == c {
+        i = 1;
+    }
+
+    while i < data.len() {
+        let length = helper_find_emph_char(&data[i..], c);
+        if length == 0 {
+            return (0, None);
+        }
+        i += length;
+        if i >= data.len() {
+            return (0, None);
+        }
+
+        if i + 1 < data.len() && data[i + 1] == c {
+            i += 1;
+            continue;
+        }
+
+        if data[i] == c && !is_space(data[i - 1]) {
+            if p.extensions.intersects(Extensions::NO_INTRA_EMPHASIS)
+                && !(i + 1 == data.len() || is_space(data[i + 1]) || is_punct(data[i + 1]))
+            {
+                continue;
+            }
+
+            let emph = bare_node(p, NodeType::Emph);
+            let inner = data[..i].to_vec();
+            p.inline(emph, &inner);
+            return (i + 1, Some(emph));
+        }
+    }
+
+    (0, None)
+}
+
+/// Double emphasis: `<strong>`, or `<del>` for `~~`.
+///
+/// Ported from `helperDoubleEmphasis` (`inline.go:1152`).
+fn helper_double_emphasis(p: &mut Markdown, data: &[u8], c: u8) -> (usize, Option<NodeId>) {
+    let mut i = 0;
+
+    while i < data.len() {
+        let length = helper_find_emph_char(&data[i..], c);
+        if length == 0 {
+            return (0, None);
+        }
+        i += length;
+
+        if i + 1 < data.len() && data[i] == c && data[i + 1] == c && i > 0 && !is_space(data[i - 1])
+        {
+            let node_type = if c == b'~' {
+                NodeType::Del
+            } else {
+                NodeType::Strong
+            };
+            let node = bare_node(p, node_type);
+            let inner = data[..i].to_vec();
+            p.inline(node, &inner);
+            return (i + 2, Some(node));
+        }
+        i += 1;
+    }
+    (0, None)
+}
+
+/// Triple emphasis: `<strong><em>`, falling back to the shorter forms.
+///
+/// Ported from `helperTripleEmphasis` (`inline.go:1176`).
+fn helper_triple_emphasis(
+    p: &mut Markdown,
+    data: &[u8],
+    offset: usize,
+    c: u8,
+) -> (usize, Option<NodeId>) {
+    let mut i = 0;
+    let orig_data = data;
+    let data = &data[offset..];
+
+    while i < data.len() {
+        let length = helper_find_emph_char(&data[i..], c);
+        if length == 0 {
+            return (0, None);
+        }
+        i += length;
+
+        // Skip a delimiter that whitespace precedes.
+        if data[i] != c || is_space(data[i - 1]) {
+            continue;
+        }
+
+        if i + 2 < data.len() && data[i + 1] == c && data[i + 2] == c {
+            let strong = bare_node(p, NodeType::Strong);
+            let em = bare_node(p, NodeType::Emph);
+            p.arena.append_child(strong, em);
+            let inner = data[..i].to_vec();
+            p.inline(em, &inner);
+            return (i + 3, Some(strong));
+        } else if i + 1 < data.len() && data[i + 1] == c {
+            // Two found; hand back to single emphasis.
+            let (length, node) = helper_emphasis(p, &orig_data[offset - 2..], c);
+            if length == 0 {
+                return (0, None);
+            }
+            return (length - 2, node);
+        } else {
+            // One found; hand back to double emphasis.
+            let (length, node) = helper_double_emphasis(p, &orig_data[offset - 1..], c);
+            if length == 0 {
+                return (0, None);
+            }
+            return (length - 1, node);
+        }
+    }
+    (0, None)
 }
 
 #[cfg(test)]

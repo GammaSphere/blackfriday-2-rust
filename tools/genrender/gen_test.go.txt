@@ -147,6 +147,8 @@ func TestZZGenRender(t *testing.T) {
 
 			fmt.Fprintf(f, "C %d %s %s\n", caseID, cfg.name,
 				hex.EncodeToString([]byte(s.name)))
+			fmt.Fprintf(f, "S %d %d %s\n", caseID, int(cfg.ext),
+				hex.EncodeToString([]byte(s.src)))
 			dumpTree(f, caseID, ast)
 
 			r := NewHTMLRenderer(cfg.params)

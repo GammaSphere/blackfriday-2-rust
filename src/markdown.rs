@@ -41,8 +41,8 @@
 //! turn "explicitly unresolvable" into "look it up anyway", so the port uses
 //! the explicit [`RefOverride`] enum.
 
-use crate::flags::Extensions;
-use crate::node::{Arena, NodeId, NodeType, WalkStatus};
+use crate::flags::{Extensions, ListType};
+use crate::node::{Arena, NodeId, NodeType, WalkStatus, Walker};
 
 /// Scans the link and optional title of a reference definition.
 ///
@@ -141,6 +141,61 @@ fn scan_link_ref(data: &[u8], mut i: usize) -> (usize, usize, usize, usize, usiz
     }
 
     (link_offset, link_end, title_offset, title_end, line_end)
+}
+
+/// Renders `input` with the defaults, returning HTML.
+///
+/// Ported from `Run` (`markdown.go:381`), which builds an
+/// [`HtmlRenderer`](crate::html::HtmlRenderer) with
+/// [`HtmlFlags::COMMON`](crate::HtmlFlags::COMMON) and parses with
+/// [`Extensions::COMMON`](crate::Extensions::COMMON).
+///
+/// ```
+/// let html = blackfriday::run(b"# Hello\n\nA *world*.\n");
+/// assert_eq!(
+///     String::from_utf8(html).unwrap(),
+///     "<h1>Hello</h1>\n\n<p>A <em>world</em>.</p>\n",
+/// );
+/// ```
+pub fn run(input: &[u8]) -> Vec<u8> {
+    let mut renderer = crate::html::HtmlRenderer::new(crate::html::HtmlRendererParameters {
+        flags: crate::flags::HtmlFlags::COMMON,
+        ..Default::default()
+    });
+    run_with(input, Options::common(), &mut renderer)
+}
+
+/// Renders `input` with a chosen option set and renderer.
+///
+/// The rest of `Run`: parse, then header, body walk, footer. Go reaches this
+/// configuration through `WithExtensions` and `WithRenderer`; see the module
+/// documentation for why the port takes them as arguments instead.
+///
+/// ```
+/// use blackfriday::html::{HtmlRenderer, HtmlRendererParameters};
+/// use blackfriday::markdown::{run_with, Options};
+/// use blackfriday::{Extensions, HtmlFlags};
+///
+/// let mut r = HtmlRenderer::new(HtmlRendererParameters {
+///     flags: HtmlFlags::COMMON | HtmlFlags::SKIP_HTML,
+///     ..Default::default()
+/// });
+/// let html = run_with(b"<b>x</b>\n", Options::common(), &mut r);
+/// assert_eq!(String::from_utf8(html).unwrap(), "<p>x</p>\n");
+/// ```
+pub fn run_with<R: Renderer + ?Sized>(input: &[u8], options: Options, renderer: &mut R) -> Vec<u8> {
+    let mut parser = Markdown::new(options);
+    let ast = parser.parse(input);
+
+    let mut buf = Vec::new();
+    renderer.render_header(&mut buf, &mut parser.arena, ast);
+    let mut walker = Walker::new(ast);
+    while let Some((node, entering)) = walker.current() {
+        let status = renderer.render_node(&mut buf, &parser.arena, node, entering);
+        walker.advance(&parser.arena, status);
+    }
+    renderer.render_footer(&mut buf, &parser.arena, ast);
+    buf
 }
 
 /// Maximum nesting depth for blocks and inline elements.
@@ -309,11 +364,6 @@ impl Options {
 ///
 /// The pointer fields of the Go original — `doc`, `tip`, `oldTip`,
 /// `lastMatchedContainer` — are [`NodeId`]s into an owned [`Arena`].
-// The parser state is written by `new` and read by the scanners in `block.rs`
-// and `inline.rs`. None of it is reachable from outside the crate until the
-// `run` entry point lands, so rustc sees write-only fields and methods only the
-// tests call. The allow is scoped to this type and comes off with `run`.
-#[allow(dead_code)]
 pub struct Markdown {
     pub(crate) arena: Arena,
     pub(crate) extensions: Extensions,
@@ -333,9 +383,15 @@ pub struct Markdown {
     pub(crate) old_tip: NodeId,
     pub(crate) last_matched_container: NodeId,
     pub(crate) all_closed: bool,
+
+    /// Which inline handler each byte value dispatches to.
+    ///
+    /// Upstream's `inlineCallback [256]inlineParser`. The handlers take the
+    /// parser as their first argument rather than closing over it, so plain
+    /// function pointers carry across unchanged.
+    pub(crate) inline_callback: [Option<crate::inline::InlineParser>; 256],
 }
 
-#[allow(dead_code)] // see the note on the struct
 impl Markdown {
     /// Constructs a parser, mirroring Go's `New`.
     pub fn new(options: Options) -> Self {
@@ -355,6 +411,7 @@ impl Markdown {
             old_tip: doc,
             last_matched_container: doc,
             all_closed: true,
+            inline_callback: crate::inline::callbacks(options.extensions),
         }
     }
 
@@ -374,23 +431,49 @@ impl Markdown {
     /// its key exactly as Go does — note that Go uses `strings.ToLower`, which
     /// is Unicode-aware, not an ASCII fold.
     pub(crate) fn get_ref(&self, refid: &str) -> Option<InternalReference> {
+        self.get_ref_owned(refid).map(|(r, _)| r)
+    }
+
+    /// The same lookup, also reporting whether the reference is the parser's
+    /// own rather than one the override callback made up.
+    ///
+    /// Go returns a `*reference`, so a caller that writes through it writes
+    /// into `p.refs` — but only when the reference came from there. The
+    /// override path allocates a fresh one on every call, and mutating that
+    /// changes nothing which outlives the call. [`crate::inline`] depends on
+    /// the difference when it assigns note ids to deferred footnotes, so the
+    /// origin has to be part of the answer here rather than guessed at there.
+    pub(crate) fn get_ref_owned(&self, refid: &str) -> Option<(InternalReference, bool)> {
         if let Some(over) = &self.reference_override {
             match over(refid) {
                 RefOverride::ToNothing => return None,
                 RefOverride::To(r) => {
-                    return Some(InternalReference {
-                        link: r.link.into_bytes(),
-                        title: r.title.into_bytes(),
-                        note_id: 0,
-                        has_block: false,
-                        footnote: None,
-                        text: r.text.into_bytes(),
-                    })
+                    return Some((
+                        InternalReference {
+                            link: r.link.into_bytes(),
+                            title: r.title.into_bytes(),
+                            note_id: 0,
+                            has_block: false,
+                            footnote: None,
+                            text: r.text.into_bytes(),
+                        },
+                        false,
+                    ))
                 }
                 RefOverride::NotOverridden => {}
             }
         }
-        self.refs.get(&refid.to_lowercase()).cloned()
+        self.refs
+            .get(&refid.to_lowercase())
+            .cloned()
+            .map(|r| (r, true))
+    }
+
+    /// Writes a reference back into the parser's table.
+    ///
+    /// Stands in for Go writing through the pointer `get_ref` handed out.
+    pub(crate) fn put_ref(&mut self, refid: &str, r: InternalReference) {
+        self.refs.insert(refid.to_lowercase(), r);
     }
 
     /// Closes `block`, moving the insertion point to its parent.
@@ -423,6 +506,105 @@ impl Markdown {
         self.arena.append_child(tip, node);
         self.tip = node;
         node
+    }
+
+    /// Parses `input`, returning the document root.
+    ///
+    /// Ported from `Parse` (`markdown.go:403`): block structure first, then a
+    /// walk that turns each block's raw content into inline children, then the
+    /// footnote list.
+    ///
+    /// The inline walk runs on both the entering and the leaving visit,
+    /// because Go's visitor does not test `entering`. The second call is a
+    /// no-op only because the first cleared `content`, which is why the
+    /// content is taken rather than copied here.
+    pub fn parse(&mut self, input: &[u8]) -> NodeId {
+        self.block(input);
+
+        // Go writes `for p.tip != nil { p.finalize(p.tip) }`. `tip` is a
+        // `NodeId` here rather than a nullable pointer, so the walk to the
+        // root is spelled out; the effect — every open block closed — is the
+        // same.
+        let mut tip = Some(self.tip);
+        while let Some(t) = tip {
+            let parent = self.arena[t].parent();
+            self.arena[t].open = false;
+            if let Some(above) = parent {
+                self.tip = above;
+            }
+            tip = parent;
+        }
+
+        let mut walker = Walker::new(self.doc);
+        while let Some((node, _entering)) = walker.current() {
+            if matches!(
+                self.arena[node].node_type,
+                NodeType::Paragraph | NodeType::Heading | NodeType::TableCell
+            ) {
+                let content = std::mem::take(&mut self.arena.get_mut(node).content);
+                self.inline(node, &content);
+            }
+            walker.advance(&self.arena, WalkStatus::GoToNext);
+        }
+
+        self.parse_refs_to_ast();
+        self.doc
+    }
+
+    /// Appends the footnote list, if there is one.
+    ///
+    /// Ported from `parseRefsToAST` (`markdown.go:421`). The loop is indexed
+    /// rather than iterator-based on purpose, and upstream says why: parsing a
+    /// footnote's body can append further footnotes, and those late arrivals
+    /// have to be processed too.
+    fn parse_refs_to_ast(&mut self) {
+        if !self.extensions.intersects(Extensions::FOOTNOTES) || self.notes.is_empty() {
+            return;
+        }
+        self.tip = self.doc;
+        let block = self.add_block(NodeType::List, &[]);
+        self.arena[block].list.is_footnotes_list = true;
+        self.arena[block].list.list_flags = ListType::ORDERED;
+
+        let mut flags = ListType::ITEM_BEGINNING_OF_LIST;
+        let mut i = 0;
+        while i < self.notes.len() {
+            let note = self.notes[i].clone();
+            let Some(footnote) = note.footnote else {
+                // Every reference reaching `notes` was given one by `link`.
+                i += 1;
+                continue;
+            };
+            self.add_existing_child(footnote);
+            self.arena[footnote].list.list_flags = flags | ListType::ORDERED;
+            self.arena[footnote].list.ref_link = Some(note.link.clone());
+            if note.has_block {
+                flags |= ListType::ITEM_CONTAINS_BLOCK;
+                self.block(&note.title);
+            } else {
+                self.inline(footnote, &note.title);
+            }
+            flags = flags.without(ListType::ITEM_BEGINNING_OF_LIST | ListType::ITEM_CONTAINS_BLOCK);
+            i += 1;
+        }
+
+        let above = self.arena[block].parent();
+        crate::block::finalize_list(&mut self.arena, block);
+        if let Some(a) = above {
+            self.tip = a;
+        }
+
+        let mut walker = Walker::new(block);
+        while let Some((node, _entering)) = walker.current() {
+            if matches!(
+                self.arena[node].node_type,
+                NodeType::Paragraph | NodeType::Heading
+            ) {
+                let content = std::mem::take(&mut self.arena.get_mut(node).content);
+                self.inline(node, &content);
+            }
+            walker.advance(&self.arena, WalkStatus::GoToNext);
+        }
     }
 
     /// Scans a link-reference definition, registering it and returning its

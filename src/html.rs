@@ -6,10 +6,6 @@
 //! and that pattern is hand-coded separately rather than pulling in a regex
 //! crate for one use.
 
-// The helpers below are consumed by `render_node`, which lands in the next
-// commit. Until then only the tests reach them.
-#![allow(dead_code)]
-
 use crate::esc::{esc_link, escape_all_html, escape_html};
 use crate::flags::{CellAlignFlags, HtmlFlags};
 use crate::markdown::Renderer;
@@ -480,6 +476,15 @@ pub(crate) fn need_skip_link(flags: HtmlFlags, dest: &[u8]) -> bool {
 /// Whether `tag` is an HTML tag named `tagname`.
 ///
 /// Ported from `isHTMLTag` (`html.go:151`).
+// A dead cluster, preserved on purpose. `isHTMLTag` and `isSmartypantable`
+// have no callers anywhere in blackfriday v2 outside its own tests, and
+// `findHTMLTagPos`, `skipUntilCharIgnoreQuotes` and `skipSpace` exist only to
+// serve `isHTMLTag` -- `skipUntilCharIgnoreQuotes` has one live caller, from
+// within that same cluster. `isSmartypantable` looks like a v1 leftover: v2
+// decides smartypants from the renderer's flags at the `Text` arm instead of
+// asking the node. They are ported and tested because equivalence is the goal
+// and a future upstream change could wake them up.
+#[allow(dead_code)]
 pub(crate) fn is_html_tag(tag: &[u8], tagname: &str) -> bool {
     find_html_tag_pos(tag, tagname).0
 }
@@ -491,6 +496,7 @@ pub(crate) fn is_html_tag(tag: &[u8], tagname: &str) -> bool {
 ///
 /// Returns `start` — not the length — when the character is never found, which
 /// is what makes the `rightAngle >= i` test in [`find_html_tag_pos`] meaningful.
+#[allow(dead_code)] // see the note on `is_html_tag`
 pub(crate) fn skip_until_char_ignore_quotes(html: &[u8], start: usize, ch: u8) -> usize {
     let mut in_single = false;
     let mut in_double = false;
@@ -515,6 +521,7 @@ pub(crate) fn skip_until_char_ignore_quotes(html: &[u8], start: usize, ch: u8) -
 ///
 /// Ported from `findHTMLTagPos` (`html.go:179`). Tag names are matched
 /// case-insensitively, one byte at a time.
+#[allow(dead_code)] // see the note on `is_html_tag`
 pub(crate) fn find_html_tag_pos(tag: &[u8], tagname: &str) -> (bool, isize) {
     let mut i = 0usize;
     if i < tag.len() && tag[0] != b'<' {
@@ -557,6 +564,7 @@ pub(crate) fn find_html_tag_pos(tag: &[u8], tagname: &str) -> (bool, isize) {
 ///
 /// Ported from `skipSpace` (`html.go:215`). Uses blackfriday's own whitespace
 /// definition, which includes form feed and vertical tab.
+#[allow(dead_code)] // see the note on `is_html_tag`
 pub(crate) fn skip_space(tag: &[u8], mut i: usize) -> usize {
     while i < tag.len() && crate::util::is_space(tag[i]) {
         i += 1;
@@ -631,6 +639,7 @@ pub(crate) fn is_mailto(link: &[u8]) -> bool {
 ///
 /// Ported from `isSmartypantable` (`html.go:317`): not inside links, code
 /// blocks or code spans.
+#[allow(dead_code)] // see the note on `is_html_tag`
 pub(crate) fn is_smartypantable(arena: &Arena, node: NodeId) -> bool {
     let Some(parent) = arena[node].parent() else {
         return true;
