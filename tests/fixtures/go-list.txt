@@ -1,0 +1,73 @@
+P  0 0 0
+P 2a 0 0 0
+P 2a20 2 0 0
+P 2a78 0 0 0
+P 2a2078 2 0 0
+P 2b2078 2 0 0
+P 2d2078 2 0 0
+P 2a0978 2 0 0
+P 2d09 2 0 0
+P 202a2078 3 0 0
+P 20202a2078 4 0 0
+P 2020202a2078 5 0 0
+P 202020202a2078 0 0 0
+P 31 0 0 0
+P 312e 0 0 0
+P 312e20 0 3 0
+P 312e78 0 0 0
+P 312e2078 0 3 0
+P 31322e2078 0 4 0
+P 3132333435362e2078 0 8 0
+P 312e0978 0 3 0
+P 302e2078 0 3 0
+P 20312e2078 0 4 0
+P 202020312e2078 0 6 0
+P 20202020312e2078 0 0 0
+P 31292078 0 0 0
+P 3a 0 0 0
+P 3a20 0 0 2
+P 3a78 0 0 0
+P 3a2078 0 0 2
+P 3a0978 0 0 2
+P 20203a2078 0 0 0
+P 3a202078 0 0 2
+P 3a20202078 0 0 2
+P 61 0 0 0
+P 6162 0 0 0
+P 20 0 0 0
+P 2020 0 0 0
+P 202020 0 0 0
+P 09 0 0 0
+P 2d20 2 0 0
+P 2a202a202a 2 0 0
+T 2a2078 0 false
+T 2a2078 1 true
+T 2a2078 2 true
+T 2a2078 3 true
+T 2a2078 4 false
+T 312e2078 0 true
+T 312e2078 1 false
+T 312e2078 2 true
+T 312e2078 3 false
+T 312e2078 4 true
+T 3a2078 0 true
+T 3a2078 1 true
+T 3a2078 2 false
+T 3a2078 3 false
+T 3a2078 4 true
+T 706c61696e 0 false
+T 706c61696e 1 false
+T 706c61696e 2 false
+T 706c61696e 3 false
+T 706c61696e 4 false
+T  0 false
+T  1 false
+T  2 false
+T  3 false
+T  4 false
+E List false
+E Item false
+E Paragraph false
+E CodeBlock false
+E Document false
+L tight=true open=false

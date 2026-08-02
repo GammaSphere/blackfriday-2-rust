@@ -486,6 +486,156 @@ fn finalize_code_block(arena: &mut Arena, block: NodeId) {
     arena[block].content = Vec::new();
 }
 
+/// Length of an unordered list item prefix, or `0`.
+///
+/// Ported from `uliPrefix` (`block.go:1068`). Needs one of `*`, `+` or `-`
+/// followed by a space or tab, after at most three leading spaces.
+///
+/// Go's guard is `if i >= len(data)-1`, on signed ints, so an empty slice makes
+/// it `0 >= -1` and returns early. On `usize` that subtraction underflows, so
+/// it is written `i + 1 >= data.len()`, which agrees on every length.
+pub(crate) fn uli_prefix(data: &[u8]) -> usize {
+    let mut i = 0usize;
+    while i < data.len() && i < 3 && data[i] == b' ' {
+        i += 1;
+    }
+    if i + 1 >= data.len() {
+        return 0;
+    }
+    if (data[i] != b'*' && data[i] != b'+' && data[i] != b'-')
+        || (data[i + 1] != b' ' && data[i + 1] != b'\t')
+    {
+        return 0;
+    }
+    i + 2
+}
+
+/// Length of an ordered list item prefix, or `0`.
+///
+/// Ported from `oliPrefix` (`block.go:1086`). Digits then a `.` then a space or
+/// tab; `1) x` is not an ordered item.
+pub(crate) fn oli_prefix(data: &[u8]) -> usize {
+    let mut i = 0usize;
+    while i < 3 && i < data.len() && data[i] == b' ' {
+        i += 1;
+    }
+
+    let start = i;
+    while i < data.len() && data[i].is_ascii_digit() {
+        i += 1;
+    }
+    // Same signed-versus-usize care as uli_prefix.
+    if start == i || i + 1 >= data.len() {
+        return 0;
+    }
+
+    if data[i] != b'.' || !(data[i + 1] == b' ' || data[i + 1] == b'\t') {
+        return 0;
+    }
+    i + 2
+}
+
+/// Length of a definition list item prefix, or `0`.
+///
+/// Ported from `dliPrefix` (`block.go:1111`). Returns only ever `0` or `2`.
+///
+/// Upstream ends with a loop that looks like it should skip spaces:
+///
+/// ```go
+/// for i < len(data) && data[i] == ' ' {
+///     i++
+/// }
+/// return i + 2
+/// ```
+///
+/// but `i` is still `0` there and `data[0]` has just been established to be
+/// `':'`, so the condition is false on the first test and the loop never runs.
+/// It is dead code, and the measured results confirm the function returns
+/// nothing but `0` and `2`. Ported as written rather than "corrected", since
+/// making it skip spaces would change the prefix length.
+pub(crate) fn dli_prefix(data: &[u8]) -> usize {
+    if data.len() < 2 {
+        return 0;
+    }
+    let mut i = 0usize;
+    if data[i] != b':' || !(data[i + 1] == b' ' || data[i + 1] == b'\t') {
+        return 0;
+    }
+    // Vestigial in upstream: data[0] is ':' so this never advances.
+    while i < data.len() && data[i] == b' ' {
+        i += 1;
+    }
+    i + 2
+}
+
+/// Whether the item at `data` differs in type from the list holding it.
+///
+/// Ported from `listTypeChanged` (`block.go:1153`).
+pub(crate) fn list_type_changed(data: &[u8], flags: crate::ListType) -> bool {
+    use crate::ListType;
+    // Go writes this as an if / else-if chain whose arms all return true, which
+    // is an OR. `||` short-circuits the same way the chain does, so later
+    // prefixes are still only scanned when the earlier ones did not match.
+    (dli_prefix(data) > 0 && !flags.intersects(ListType::DEFINITION))
+        || (oli_prefix(data) > 0 && !flags.intersects(ListType::ORDERED))
+        || (uli_prefix(data) > 0
+            && (flags.intersects(ListType::ORDERED) || flags.intersects(ListType::DEFINITION)))
+}
+
+/// Whether a block ends with a blank line.
+///
+/// Ported from `endsWithBlankLine` (`block.go:1166`), where the body that would
+/// answer the question is commented out behind a `TODO: figure this out. Always
+/// false now.` The loop walks down `LastChild` through lists and items and then
+/// returns `false` regardless.
+///
+/// This is preserved rather than implemented. Making it work would change how
+/// [`finalize_list`] sets `tight`, and therefore the rendered output — a
+/// divergence, and one the pinned suite would not catch since it encodes the
+/// current behaviour. Measured across `List`, `Item`, `Paragraph`, `CodeBlock`
+/// and `Document`: always `false`.
+pub(crate) fn ends_with_blank_line(arena: &Arena, block: NodeId) -> bool {
+    let mut cur = Some(block);
+    while let Some(id) = cur {
+        // Upstream checks `block.lastLineBlank` here; it is commented out.
+        match arena[id].node_type {
+            NodeType::List | NodeType::Item => cur = arena[id].last_child(),
+            _ => break,
+        }
+    }
+    false
+}
+
+/// Closes a list, deciding whether it renders tight.
+///
+/// Ported from `finalizeList` (`block.go:1182`). Because
+/// [`ends_with_blank_line`] is stubbed to `false` upstream, neither branch that
+/// would clear `tight` can fire, so in practice this only closes the node. The
+/// structure is kept so the port tracks upstream if that `TODO` is ever
+/// resolved.
+pub(crate) fn finalize_list(arena: &mut Arena, block: NodeId) {
+    arena[block].open = false;
+
+    let mut item = arena[block].first_child();
+    while let Some(it) = item {
+        if ends_with_blank_line(arena, it) && arena[it].next().is_some() {
+            arena[block].list.tight = false;
+            break;
+        }
+        let mut sub_item = arena[it].first_child();
+        while let Some(sub) = sub_item {
+            if ends_with_blank_line(arena, sub)
+                && (arena[it].next().is_some() || arena[sub].next().is_some())
+            {
+                arena[block].list.tight = false;
+                break;
+            }
+            sub_item = arena[sub].next();
+        }
+        item = arena[it].next();
+    }
+}
+
 /// Length of a blockquote prefix, or `0`.
 ///
 /// Ported from `quotePrefix` (`block.go:943`). A single space after the `>` is
@@ -1350,6 +1500,142 @@ mod tests {
         assert_eq!(consumed, 6, "stops before \"plain\"");
         let c = p.arena()[p.document()].first_child().unwrap();
         assert_eq!(p.arena()[c].literal, b"a\n");
+    }
+
+    /// Measured Go answers for the list-item scanners.
+    const LIST_FIXTURE: &str = include_str!("../tests/fixtures/go-list.txt");
+
+    fn list_rows(tag: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+        LIST_FIXTURE.lines().filter_map(move |l| {
+            let f: Vec<String> = l.split(' ').map(str::to_string).collect();
+            (f.first().map(String::as_str) == Some(tag)).then_some(f)
+        })
+    }
+
+    #[test]
+    fn list_item_prefixes_match_go() {
+        let mut n = 0;
+        for f in list_rows("P") {
+            let data = unhex(&f[1]);
+            let ctx = format!("{:?}", String::from_utf8_lossy(&data));
+            assert_eq!(
+                uli_prefix(&data),
+                f[2].parse::<usize>().unwrap(),
+                "uli_prefix({ctx})"
+            );
+            assert_eq!(
+                oli_prefix(&data),
+                f[3].parse::<usize>().unwrap(),
+                "oli_prefix({ctx})"
+            );
+            assert_eq!(
+                dli_prefix(&data),
+                f[4].parse::<usize>().unwrap(),
+                "dli_prefix({ctx})"
+            );
+            n += 1;
+        }
+        assert!(n >= 40, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn list_type_changed_matches_go() {
+        let mut n = 0;
+        for f in list_rows("T") {
+            let data = unhex(&f[1]);
+            let flags = crate::ListType::from_bits_retain(f[2].parse::<i32>().unwrap());
+            assert_eq!(
+                list_type_changed(&data, flags),
+                f[3] == "true",
+                "list_type_changed({:?}, {flags:?})",
+                String::from_utf8_lossy(&data)
+            );
+            n += 1;
+        }
+        assert!(n >= 20, "thin corpus: {n}");
+    }
+
+    #[test]
+    fn prefix_scanners_survive_short_input() {
+        // Go's `i >= len(data)-1` relies on signed arithmetic; on usize the
+        // same expression would underflow on empty input.
+        for d in [&b""[..], b" ", b"*", b"1", b":", b"  ", b"   ", b"1."] {
+            let _ = uli_prefix(d);
+            let _ = oli_prefix(d);
+            let _ = dli_prefix(d);
+        }
+        assert_eq!(uli_prefix(b""), 0);
+        assert_eq!(oli_prefix(b""), 0);
+        assert_eq!(dli_prefix(b""), 0);
+        assert_eq!(uli_prefix(b"*"), 0, "marker with nothing after it");
+        assert_eq!(oli_prefix(b"1."), 0, "dot with nothing after it");
+    }
+
+    #[test]
+    fn ordered_items_need_a_dot_not_a_paren() {
+        assert_eq!(oli_prefix(b"1. x"), 3);
+        assert_eq!(oli_prefix(b"1) x"), 0, "blackfriday predates that syntax");
+        assert_eq!(oli_prefix(b"12. x"), 4);
+        assert_eq!(oli_prefix(b"1.\tx"), 3, "a tab counts too");
+    }
+
+    #[test]
+    fn dli_prefix_only_ever_returns_zero_or_two() {
+        // The space-skipping loop at the end of dliPrefix is dead code: i is
+        // still 0 and data[0] is ':'. Confirmed across the whole corpus.
+        for f in list_rows("P") {
+            let got = dli_prefix(&unhex(&f[1]));
+            assert!(got == 0 || got == 2, "dli_prefix returned {got}");
+        }
+        assert_eq!(dli_prefix(b": x"), 2);
+        assert_eq!(dli_prefix(b":  x"), 2, "extra spaces are NOT skipped");
+        assert_eq!(dli_prefix(b":   x"), 2);
+    }
+
+    #[test]
+    fn ends_with_blank_line_is_always_false_upstream() {
+        use crate::markdown::Options;
+        let mut p = Markdown::new(Options::none());
+        let list = p.arena.new_node(NodeType::List);
+        let item = p.arena.new_node(NodeType::Item);
+        let para = p.arena.new_node(NodeType::Paragraph);
+        p.arena.append_child(list, item);
+        p.arena.append_child(item, para);
+
+        // Upstream's body is commented out behind a TODO; every shape is false.
+        for n in [list, item, para] {
+            assert!(!ends_with_blank_line(&p.arena, n));
+        }
+        for f in list_rows("E") {
+            assert_eq!(f[2], "false", "fixture says {} is {}", f[1], f[2]);
+        }
+    }
+
+    #[test]
+    fn finalize_list_closes_the_node_but_never_clears_tight() {
+        use crate::markdown::Options;
+        let mut p = Markdown::new(Options::none());
+        let list = p.arena.new_node(NodeType::List);
+        p.arena[list].list.tight = true;
+        let i1 = p.arena.new_node(NodeType::Item);
+        let i2 = p.arena.new_node(NodeType::Item);
+        p.arena.append_child(list, i1);
+        p.arena.append_child(list, i2);
+        let pa = p.arena.new_node(NodeType::Paragraph);
+        let pb = p.arena.new_node(NodeType::Paragraph);
+        p.arena.append_child(i1, pa);
+        p.arena.append_child(i2, pb);
+
+        finalize_list(&mut p.arena, list);
+
+        assert!(!p.arena[list].open, "the list is closed");
+        assert!(
+            p.arena[list].list.tight,
+            "tight survives, because ends_with_blank_line is stubbed to false"
+        );
+        // And that is what Go does too.
+        let l = list_rows("L").next().unwrap();
+        assert_eq!(l[1], "tight=true");
     }
 
     #[test]

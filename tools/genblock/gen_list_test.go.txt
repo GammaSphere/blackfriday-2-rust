@@ -1,0 +1,108 @@
+package blackfriday
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// Scratch-only generator (not part of the pinned suite). Emits measured Go
+// answers for the list-item prefix scanners, listTypeChanged, and the
+// endsWithBlankLine / finalizeList pair.
+
+func safeULI(p *Markdown, d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	return fmt.Sprintf("%d", p.uliPrefix(d))
+}
+
+func safeOLI(p *Markdown, d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	return fmt.Sprintf("%d", p.oliPrefix(d))
+}
+
+func safeDLI(p *Markdown, d []byte) (res string) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = "PANIC"
+		}
+	}()
+	return fmt.Sprintf("%d", p.dliPrefix(d))
+}
+
+func TestZZGenList(t *testing.T) {
+	f, err := os.Create("list-fixture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	p := New()
+
+	cases := [][]byte{
+		[]byte(""), []byte("*"), []byte("* "), []byte("*x"), []byte("* x"),
+		[]byte("+ x"), []byte("- x"), []byte("*\tx"), []byte("-\t"),
+		[]byte(" * x"), []byte("  * x"), []byte("   * x"), []byte("    * x"),
+		[]byte("1"), []byte("1."), []byte("1. "), []byte("1.x"), []byte("1. x"),
+		[]byte("12. x"), []byte("123456. x"), []byte("1.\tx"), []byte("0. x"),
+		[]byte(" 1. x"), []byte("   1. x"), []byte("    1. x"), []byte("1) x"),
+		[]byte(":"), []byte(": "), []byte(":x"), []byte(": x"), []byte(":\tx"),
+		[]byte("  : x"), []byte(":  x"), []byte(":   x"),
+		[]byte("a"), []byte("ab"), []byte(" "), []byte("  "), []byte("   "),
+		[]byte("\t"), []byte("- "), []byte("* * *"),
+	}
+	for _, d := range cases {
+		fmt.Fprintf(f, "P %s %s %s %s\n", hex.EncodeToString(d),
+			safeULI(p, d), safeOLI(p, d), safeDLI(p, d))
+	}
+
+	// listTypeChanged across the flag combinations that matter
+	flagSets := []ListType{
+		0,
+		ListTypeOrdered,
+		ListTypeDefinition,
+		ListTypeOrdered | ListTypeDefinition,
+		ListTypeTerm,
+	}
+	changeCases := [][]byte{
+		[]byte("* x"), []byte("1. x"), []byte(": x"), []byte("plain"), []byte(""),
+	}
+	for _, d := range changeCases {
+		for _, fl := range flagSets {
+			v := fl
+			fmt.Fprintf(f, "T %s %d %v\n", hex.EncodeToString(d), int(fl),
+				p.listTypeChanged(d, &v))
+		}
+	}
+
+	// endsWithBlankLine: upstream's body is commented out, so this records
+	// what it actually returns for a variety of shapes.
+	mk := func(t NodeType) *Node { return NewNode(t) }
+	list := mk(List)
+	item := mk(Item)
+	para := mk(Paragraph)
+	list.AppendChild(item)
+	item.AppendChild(para)
+	for _, n := range []*Node{list, item, para, mk(CodeBlock), mk(Document)} {
+		fmt.Fprintf(f, "E %s %v\n", n.Type, endsWithBlankLine(n))
+	}
+
+	// finalizeList: does it ever clear Tight?
+	l2 := mk(List)
+	l2.ListData.Tight = true
+	i1, i2 := mk(Item), mk(Item)
+	l2.AppendChild(i1)
+	l2.AppendChild(i2)
+	i1.AppendChild(mk(Paragraph))
+	i2.AppendChild(mk(Paragraph))
+	finalizeList(l2)
+	fmt.Fprintf(f, "L tight=%v open=%v\n", l2.ListData.Tight, l2.IsFenced)
+}
