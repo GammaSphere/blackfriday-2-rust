@@ -1,0 +1,47 @@
+{
+  "$comment": [
+    "Machine-readable form of the table in BENCHMARKS.md, which is the",
+    "authoritative write-up and carries the method and the confounders.",
+    "Reproduce with: pwsh bench/run.ps1 -Iterations 50 -Batch 40 -Repeats 5"
+  ],
+  "recorded_utc": "2026-08-02T23:10:00Z",
+  "platform": {
+    "os": "Windows 11 Pro 10.0.26200",
+    "arch": "x86_64",
+    "rust": "1.97.1 (x86_64-pc-windows-msvc)",
+    "go": "go1.23.5 windows/amd64",
+    "rust_profile": "release, lto=true, codegen-units=1",
+    "go_profile": "default"
+  },
+  "workload": {
+    "corpus": "tests/original/testdata",
+    "documents": 23,
+    "corpus_bytes": 42543,
+    "extensions": "CommonExtensions",
+    "html_flags": "CommonHTMLFlags",
+    "samples": 50,
+    "passes_per_sample": 40,
+    "repeats": 5,
+    "selection": "best of repeats, by p50"
+  },
+  "latency_ms_per_corpus_pass": {
+    "rust": { "min": 0.6349, "p50": 0.7544, "p90": 0.9582, "p99": 1.1695, "max": 1.1695 },
+    "go": { "min": 0.7268, "p50": 0.7773, "p90": 0.8143, "p99": 0.8881, "max": 0.8881 }
+  },
+  "throughput_mib_s": { "rust": 51.88, "go": 52.05 },
+  "peak_rss_mib": { "rust": 5.52, "go": 13.59 },
+  "startup_ms": { "rust": 5.48, "go": 7.76 },
+  "summary": {
+    "throughput": "level",
+    "median_latency": "rust 1.03x faster",
+    "p99_latency": "rust 0.76x — slower, see BENCHMARKS.md for the cause",
+    "peak_memory": "rust 2.46x lower",
+    "startup": "rust 1.42x faster"
+  },
+  "known_confounders": [
+    "One machine, one platform; the allocator and the clock both matter here.",
+    "One small corpus (42 KB) of hand-written Markdown from 2004.",
+    "Go's clock quantises a sub-millisecond interval, which is why a sample times 40 passes rather than 1.",
+    "Best of five repeats; the spread between repeats was a few percent."
+  ]
+}

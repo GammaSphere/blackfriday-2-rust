@@ -1,19 +1,38 @@
 # The hackathon brief itself is not part of the submission.
 task.md
 
-# Rust
+# Rust build output
 /target/
 **/*.rs.bk
+
+# Go build output. The harnesses are sources; their binaries are not, and a
+# committed .exe would be noise as well as a portability claim this repo does
+# not make.
+*.exe
+*.test
+*.dll
+*.dylib
+*.so
+*.a
+*.lib
+*.pdb
+
+# Native artifacts the cdylib produces for a cgo consumer
+adapter/lib/
+
+# Scratch logs and working files. The published evidence is tracked explicitly:
+#   fuzz/log.txt                the timestamped differential fuzz run
+#   tests/baseline-go-test.log  the upstream baseline recorded at kickoff
+#   bench/results.json          the benchmark numbers (not a log, always tracked)
+*.log
+*.out
+!fuzz/log.txt
+!tests/baseline-go-test.log
+
+# Fuzzing scratch, if cargo-fuzz is ever used
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
-
-# Go adapter build output
-adapter/*.exe
-adapter/*.test
-
-# Native artifacts produced by the cdylib and consumed by the Go adapter
-adapter/lib/
 
 # Agent harness scratch
 .claude/
@@ -23,12 +42,3 @@ adapter/lib/
 .idea/
 .DS_Store
 Thumbs.db
-
-# Fuzz and bench build output; the harnesses are sources, the binaries are not
-fuzz/*.exe
-fuzz/*.test
-bench/go/*.exe
-
-# Scratch logs. The published fuzz log lives at docs/fuzz-run.log.
-fuzz/*.log
-fuzz/*.txt

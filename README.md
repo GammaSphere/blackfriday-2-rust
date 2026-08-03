@@ -21,7 +21,7 @@ Go Markdown processor by Russ Ross.
 | | |
 |---|---|
 | **Original Go suite, unmodified** | **65 of 65 pass** — [PARITY.md](PARITY.md) |
-| **Differential fuzzing** | **804,261 inputs, 0 divergences** — [docs/fuzz-run.log](docs/fuzz-run.log) |
+| **Differential fuzzing** | **804,261 inputs, 0 divergences** — [fuzz/log.txt](fuzz/log.txt) |
 | **Port's own tests** | 211 unit + 1,449 end-to-end + 1,449 renderer + 11 doctests |
 | **Dependencies** | **zero** |
 | **`unsafe` in the library** | **zero** (`#![forbid(unsafe_code)]`) |
@@ -99,11 +99,46 @@ the crate forbids and which no caller can depend on. It is recorded in
 [PARITY.md](PARITY.md) and [BUGS.md](BUGS.md) rather than buried, because a
 parity claim with a silent exception is not a parity claim.
 
+## `unsafe`, counted
+
+Counting method: `grep -rn "unsafe" <dir>` over every Rust source in the
+repository, then reading each hit and discarding comments. Reproduce with
+`grep -rn unsafe src/ harness/src/ bench/rust/ examples/ ffi/src/`.
+
+| crate | ships? | `unsafe` | note |
+|---|---|---:|---|
+| `src/` — the library | **yes** | **0** | `#![forbid(unsafe_code)]`; the two textual hits are a doc comment and the phrase "unsafe link" |
+| `harness/` — `bf-serve` | test tooling | **0** | also `#![forbid(unsafe_code)]` |
+| `bench/rust/` | test tooling | **0** | one doc comment |
+| `examples/render` | yes | **0** | |
+| `ffi/` — the C ABI | **no** | **10** | 9 `unsafe extern "C"` entry points and 1 block, each with a `# Safety` contract |
+
+**Everything that ships has zero `unsafe`.** The ten in `ffi/` are an optional
+C ABI for callers embedding the port from C or cgo. Nothing in the parity run,
+the fuzzer, or the benchmarks touches it — the harness uses a pipe instead —
+so it could be deleted without changing a single number above. It is kept
+because it works and is covered by its own tests, not because anything here
+depends on it.
+
+## The shipped artifact is standalone
+
+The library is pure Rust with an empty `[dependencies]`. It does not shell out
+to blackfriday, does not link the Go runtime, and does not need a Go toolchain
+to build or run:
+
+```bash
+cargo build --release   # no Go anywhere in this
+```
+
+Go appears in this repository in exactly one direction: **the original Go test
+suite calls into the Rust port**, over a pipe, so that upstream's own tests can
+be run unmodified. That is test tooling, and the data flows Go → Rust, not the
+reverse. `cargo tree` shows one crate and nothing else.
+
 ## Prerequisites
 
-- Rust 1.97+ (`rustup`)
-- Go 1.21+ — **only** to run the original suite and the fuzzer. The shipped
-  library links nothing from Go.
+- Rust 1.97+ (`rustup`) — to build and test the port
+- Go 1.21+ — **only** to run the original suite and the fuzzer
 
 No C toolchain is required. The parity harness drives the port over a pipe
 rather than through cgo; see [PARITY.md](PARITY.md) for why.

@@ -67,8 +67,7 @@ SEED ?= 20260803
 fuzz:
 	$(CARGO) build --release -p blackfriday-harness
 	cd fuzz && go build -o goserve$(EXE) ./cmd/goserve && go build -o bf-fuzz$(EXE) .
-	cd fuzz && ./bf-fuzz$(EXE) -duration $(DURATION) -seed $(SEED) -limit 2s \
-		-log ../docs/fuzz-run.log
+	cd fuzz && ./bf-fuzz$(EXE) -duration $(DURATION) -seed $(SEED) -limit 2s -log log.txt
 
 ## bench: time the port against real blackfriday
 ##

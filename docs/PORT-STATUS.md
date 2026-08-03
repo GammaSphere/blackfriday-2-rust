@@ -76,7 +76,7 @@ Takes about 26 seconds. Rebuild `bf-serve` first if `src/` changed:
 ```bash
 cd /e/projects/raptors-v2/fuzz
 go build -o goserve.exe ./cmd/goserve && go build -o bf-fuzz.exe .
-./bf-fuzz.exe -duration 180s -seed 20260803 -limit 2s -log ../docs/fuzz-run.log
+./bf-fuzz.exe -duration 180s -seed 20260803 -limit 2s -log log.txt
 ```
 
 Both implementations run as supervised children, so a hang is reported and the
@@ -140,4 +140,4 @@ would contain.
 | `BUGS.md` | five upstream defects with public-API reproducers |
 | `BENCHMARKS.md` | measurements, method, and an honest account of what is slower |
 | `DECISIONS.md` | 19 entries: every place Rust and blackfriday disagreed |
-| `docs/fuzz-run.log` | the timestamped fuzz run behind the README's number |
+| `fuzz/log.txt` | the timestamped fuzz run behind the README's number |

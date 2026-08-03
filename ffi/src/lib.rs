@@ -359,3 +359,158 @@ unsafe fn copy_out(src: &[u8], out: *mut u8, cap: usize, out_len: *mut usize) {
         *out_len = n;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Renders through the C entry point and returns an owned copy.
+    ///
+    /// # Safety
+    ///
+    /// Test-local: the pointers handed in all come from live locals, and the
+    /// result is freed through [`bf_free`] before returning.
+    unsafe fn run(input: &[u8], params: &BfParams) -> Vec<u8> {
+        let mut len = 0usize;
+        let ptr = bf_run(input.as_ptr(), input.len(), params, &mut len);
+        assert!(!ptr.is_null());
+        let out = std::slice::from_raw_parts(ptr, len).to_vec();
+        bf_free(ptr, len);
+        out
+    }
+
+    fn params(flags: HtmlFlags, extensions: Extensions) -> BfParams {
+        BfParams {
+            extensions: extensions.bits(),
+            html_flags: flags.bits(),
+            absolute_prefix: BfSlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            footnote_anchor_prefix: BfSlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            footnote_return_link_contents: BfSlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            heading_id_prefix: BfSlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            heading_id_suffix: BfSlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            heading_level_offset: 0,
+            title: BfSlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            css: BfSlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            icon: BfSlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            ref_override: None,
+            ref_override_ctx: std::ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    fn bf_run_renders_and_bf_free_releases() {
+        let p = params(HtmlFlags::COMMON, Extensions::COMMON);
+        let out = unsafe { run(b"# Hi\n\nA *world*.\n", &p) };
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "<h1>Hi</h1>\n\n<p>A <em>world</em>.</p>\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_input_round_trips() {
+        let p = params(HtmlFlags::COMMON, Extensions::COMMON);
+        assert!(unsafe { run(b"", &p) }.is_empty());
+    }
+
+    #[test]
+    fn flags_reach_the_renderer() {
+        let p = params(HtmlFlags::SKIP_HTML, Extensions::COMMON);
+        let out = unsafe { run(b"<b>x</b>\n", &p) };
+        assert_eq!(String::from_utf8(out).unwrap(), "<p>x</p>\n");
+    }
+
+    #[test]
+    fn bf_escape_html_matches_the_library() {
+        let input = b"a<b>&\"c";
+        let mut len = 0usize;
+        let out = unsafe {
+            let ptr = bf_escape_html(input.as_ptr(), input.len(), &mut len);
+            let v = std::slice::from_raw_parts(ptr, len).to_vec();
+            bf_free(ptr, len);
+            v
+        };
+        let mut want = Vec::new();
+        blackfriday::esc::escape_html(&mut want, input);
+        assert_eq!(out, want);
+    }
+
+    #[test]
+    fn bf_is_fence_line_reports_end_marker_and_info() {
+        let data = b"``` go\n";
+        let old = b"```";
+        let mut marker = [0u8; 16];
+        let mut marker_len = 0usize;
+        let mut info = [0u8; 16];
+        let mut info_len = 0usize;
+        let end = unsafe {
+            bf_is_fence_line(
+                data.as_ptr(),
+                data.len(),
+                old.as_ptr(),
+                old.len(),
+                1,
+                marker.as_mut_ptr(),
+                marker.len(),
+                &mut marker_len,
+                info.as_mut_ptr(),
+                info.len(),
+                &mut info_len,
+            )
+        };
+        assert_eq!(end, 7);
+        assert_eq!(&marker[..marker_len], b"```");
+        assert_eq!(&info[..info_len], b"go");
+    }
+
+    #[test]
+    fn bf_version_matches_the_crate() {
+        let mut len = 0usize;
+        let out = unsafe {
+            let ptr = bf_version(&mut len);
+            let v = std::slice::from_raw_parts(ptr, len).to_vec();
+            bf_free(ptr, len);
+            v
+        };
+        assert_eq!(out, blackfriday::VERSION.as_bytes());
+    }
+
+    #[test]
+    fn a_null_input_is_treated_as_empty_rather_than_dereferenced() {
+        let p = params(HtmlFlags::COMMON, Extensions::COMMON);
+        let mut len = 0usize;
+        let ptr = unsafe { bf_run(std::ptr::null(), 0, &p, &mut len) };
+        assert!(!ptr.is_null());
+        assert_eq!(len, 0);
+        unsafe { bf_free(ptr, len) };
+    }
+
+    #[test]
+    fn bf_free_ignores_null() {
+        unsafe { bf_free(std::ptr::null_mut(), 0) };
+    }
+}

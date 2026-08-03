@@ -16,8 +16,9 @@ hashes.
 
 The upstream license text is reproduced in `LICENSE-blackfriday.txt`.
 
-Port code under `src/`, `ffi/`, `tests/port/`, `fuzz/`, and `bench/` is
-original work written for this port.
+Port code under `src/`, `ffi/`, `harness/`, `adapter/`, `examples/`, `tools/`,
+`fuzz/`, `bench/`, and the port's own tests in `tests/*.rs` is original work
+written for this port. Only `tests/original/` is upstream's.
 
 ## Go standard library
 
