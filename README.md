@@ -223,6 +223,7 @@ checkout unmodified on every platform.
 - [BENCHMARKS.md](BENCHMARKS.md) — measurements, method, and what is slower
 - [DECISIONS.md](DECISIONS.md) — every place Rust and blackfriday disagreed
 - [docs/PORT-STATUS.md](docs/PORT-STATUS.md) — working notes
+- [docs/VIDEO-PLAN.md](docs/VIDEO-PLAN.md) — the demo shot list, with verified commands
 
 ## License
 
