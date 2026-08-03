@@ -11,11 +11,12 @@ is room to breathe.
 
 Run all of this first, so nothing compiles or downloads on camera:
 
-```bash
+```powershell
 cd E:\projects\raptors-v2
 cargo build --release                    # ~5s, and warms the cache
-cd fuzz && go build -o goserve.exe ./cmd/goserve && go build -o bf-fuzz.exe . && cd ..
-cd bench/go && go build -o bf-bench-go.exe . && cd ../..
+cd fuzz
+go build -o goserve.exe ./cmd/goserve; go build -o bf-fuzz.exe .; go build -o repro.exe ./cmd/repro
+cd ..\bench\go; go build -o bf-bench-go.exe .; cd ..\..
 ```
 
 Then:
@@ -47,15 +48,18 @@ Point at the results table. Do not read it aloud; it is on screen.
 
 **Terminal:**
 
-```bash
-cargo clean && cargo build --release
+```powershell
+cargo clean; cargo build --release
 ```
 
 Comes back in about five seconds with four binaries.
 
-```bash
-./target/release/bf --footnotes < docs/demo.md | head -30
+```powershell
+./target/release/bf --footnotes docs/demo.md
 ```
+
+(Note the **file argument**. `bf < docs/demo.md` does not work in PowerShell —
+`<` is reserved — which is exactly why the CLI takes a path.)
 
 > "Zero dependencies — `cargo tree` is one line. Zero `unsafe` in everything
 > that ships. And no Go anywhere in this binary; Go only shows up later, when
@@ -68,8 +72,21 @@ to kill the "is this a wrapper?" question before it forms.
 
 **Terminal:**
 
-```bash
+```powershell
 make parity
+```
+
+If `make` is not installed, the same thing spelled out (it is in
+`docs/PORT-STATUS.md` too):
+
+```powershell
+cargo build --release -p blackfriday-harness
+Remove-Item -Recurse -Force target/parity -ErrorAction SilentlyContinue
+New-Item -ItemType Directory target/parity | Out-Null
+Copy-Item adapter/go.mod, adapter/blackfriday.go target/parity/
+Copy-Item tests/original/*_test.go target/parity/
+Copy-Item -Recurse tests/original/testdata target/parity/
+cd target/parity; $env:BF_SERVE="../release/bf-serve.exe"; go test ./...; cd ../..
 ```
 
 While `verify-hashes` prints, talk:
@@ -117,25 +134,38 @@ Then, briefly:
 Optional if the pace allows — start a live run and let it scroll for ten
 seconds:
 
-```bash
-cd fuzz && ./bf-fuzz.exe -duration 30s -limit 2s
+```powershell
+cd fuzz; ./bf-fuzz.exe -duration 30s -limit 2s
 ```
 
 ## 3:05 – 4:05 — Five bugs, one of them live ← *the memorable shot*
 
 **Terminal.** Do this one live; it is eight bytes and it is unarguable.
 
-```bash
-printf '\r\n\t+ \n: ' | timeout 5 ./target/release/bf ; echo "exit=$?"
+The reproducer is committed as a file, so there is no shell quoting to get
+wrong on camera:
+
+```powershell
+Format-Hex docs/repro/bug5-hang.md
 ```
 
-`exit=124`. Then the same input against the real thing:
+Eight bytes: `0d 0a 09 2b 20 0a 3a 20` — CR LF, tab, `+`, space, LF, `:`,
+space. Now run it:
 
-```bash
-cd fuzz && printf '\r\n\t+ \n: ' | timeout 5 ./repro.exe -side go -ext common ; echo "exit=$?"
+```powershell
+./target/release/bf docs/repro/bug5-hang.md
 ```
 
-`exit=124` again.
+It hangs. **Let it sit for three or four seconds, then Ctrl-C on camera.** That
+is a better shot than a `timeout` wrapper and it needs no explanation.
+
+Then the same eight bytes against real blackfriday, from a Git Bash window:
+
+```bash
+cd fuzz && timeout 5 ./repro.exe -side go -ext common < ../docs/repro/bug5-hang.md ; echo "exit=$?"
+```
+
+`exit=124` — the timeout fired, because it never returned either.
 
 > "Eight bytes. No options — that's `Run(input)` with the defaults, which is the
 > one-line way the README tells you to use the library. `paragraph` hands off to
@@ -191,6 +221,7 @@ the submission.
   it, or use the spelled-out body in `docs/PORT-STATUS.md` under "Running the
   parity suite" — it is the same commands.
 - If `bf-serve` is missing, `cargo build --release` makes it.
-- `timeout` comes from Git Bash on Windows. In PowerShell, run the hang demo
-  from a `bash` shell, or just let it hang and press Ctrl-C on camera — that is
-  arguably a better shot anyway.
+- **PowerShell reserves `<`.** Every command in this plan is written for it;
+  use the file argument, not redirection. `Get-Content file | bf` would also
+  re-encode the bytes and is wrong here even where it appears to work.
+- `timeout` comes from Git Bash. The PowerShell shots above avoid needing it.

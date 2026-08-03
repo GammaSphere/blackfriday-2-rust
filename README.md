@@ -162,8 +162,18 @@ assert_eq!(html, b"<h1>Hello</h1>\n\n<p>A <em>world</em>.</p>\n");
 `cargo build --release` also produces a CLI at `target/release/bf`:
 
 ```bash
-target/release/bf --footnotes --toc < doc.md
-target/release/bf --help
+./target/release/bf --footnotes --toc docs/demo.md
+./target/release/bf --help
+```
+
+It takes a **file path**, not just stdin, on purpose. `bf < doc.md` is the
+obvious invocation and PowerShell rejects it — `<` is reserved there — and the
+usual workaround, `Get-Content doc.md | bf`, pipes *text* and re-encodes the
+bytes, which is fatal to a program whose whole claim is being byte-exact.
+Stdin still works where the shell supports it:
+
+```bash
+cat doc.md | ./target/release/bf
 ```
 
 ## Test

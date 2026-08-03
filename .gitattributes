@@ -8,4 +8,9 @@
 tests/original/testdata/** -text
 tests/original/**.go      -text
 
+# The bug 5 reproducer is exactly eight bytes and its CR is load-bearing: the
+# hang does not happen without it. EOL translation on checkout would silently
+# turn the reproducer into something that works.
+docs/repro/** -text
+
 *.png binary
