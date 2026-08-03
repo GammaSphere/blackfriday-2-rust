@@ -103,14 +103,13 @@ parity claim with a silent exception is not a parity claim.
 
 Counting method: `grep -rn "unsafe" <dir>` over every Rust source in the
 repository, then reading each hit and discarding comments. Reproduce with
-`grep -rn unsafe src/ harness/src/ bench/rust/ examples/ ffi/src/`.
+`grep -rn unsafe src/ harness/src/ bench/rust/ ffi/src/`.
 
 | crate | ships? | `unsafe` | note |
 |---|---|---:|---|
-| `src/` — the library | **yes** | **0** | `#![forbid(unsafe_code)]`; the two textual hits are a doc comment and the phrase "unsafe link" |
+| `src/` — the library and the `bf` CLI | **yes** | **0** | `#![forbid(unsafe_code)]`; the two textual hits are a doc comment and the phrase "unsafe link" |
 | `harness/` — `bf-serve` | test tooling | **0** | also `#![forbid(unsafe_code)]` |
 | `bench/rust/` | test tooling | **0** | one doc comment |
-| `examples/render` | yes | **0** | |
 | `ffi/` — the C ABI | **no** | **10** | 9 `unsafe extern "C"` entry points and 1 block, each with a `# Safety` contract |
 
 **Everything that ships has zero `unsafe`.** The ten in `ffi/` are an optional
@@ -149,6 +148,10 @@ rather than through cgo; see [PARITY.md](PARITY.md) for why.
 cargo build --release
 ```
 
+That is the one command. It produces `target/release/bf`, a runnable
+Markdown-to-HTML CLI, plus `target/release/bf-serve`, which `make parity`
+drives. `make` on its own does the same thing.
+
 ## Use
 
 ```rust
@@ -156,10 +159,11 @@ let html = blackfriday::run(b"# Hello\n\nA *world*.\n");
 assert_eq!(html, b"<h1>Hello</h1>\n\n<p>A <em>world</em>.</p>\n");
 ```
 
-There is a CLI for trying things by hand:
+`cargo build --release` also produces a CLI at `target/release/bf`:
 
 ```bash
-cargo run --release --example render -- --footnotes --toc < doc.md
+target/release/bf --footnotes --toc < doc.md
+target/release/bf --help
 ```
 
 ## Test
@@ -194,7 +198,7 @@ cd fuzz && go build -o goserve.exe ./cmd/goserve && go build -o bf-fuzz.exe . &&
 | `ffi/` | a C ABI — the only `unsafe` in the repository |
 | `fuzz/` | the differential fuzzer and its two supervised children |
 | `bench/` | the timing harnesses, one per language |
-| `examples/` | `render`, a small CLI |
+| `src/bin/bf.rs` | `bf`, the CLI `cargo build` produces |
 
 ## A note on line endings
 

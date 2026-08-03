@@ -339,8 +339,8 @@ takes the process down.
 **Reproduced.** `src/markdown.rs::parse_refs_to_ast` has the same indexed loop
 with the same growing bound, because the alternative is diverging from upstream
 on a documented behaviour — the comment above is explicit that late additions
-are meant to be processed. Verified by running the reproducer against
-`examples/render.rs` directly: it does not terminate, exactly as Go does not.
+are meant to be processed. Verified by running the reproducer against the `bf` CLI directly: it does
+not terminate, exactly as Go does not.
 
 It is not pinned by a test, for the obvious reason that a test which never
 returns is not a test. `fuzz/main.go` skips this input family instead, with the
@@ -421,8 +421,8 @@ that never returns, a goroutine that never exits.
 **Reproduced.** `src/block.rs::paragraph` performs the same handoff and returns
 the same count, because the behaviour is not obviously wrong at the call site
 and diverging from it would change output on inputs that do terminate.
-Verified directly against `examples/render.rs`: it does not return, exactly as
-Go does not.
+Verified directly against the `bf` CLI: it does not return, exactly as Go
+does not.
 
 Found by the differential fuzzer, which reports it as a *shared* hang — both
 implementations stop, so it is agreement rather than a divergence. It is not

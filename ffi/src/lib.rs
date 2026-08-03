@@ -19,6 +19,13 @@
 //! with [`bf_free`], passing back the same length. Nothing is returned that
 //! borrows from the caller's memory.
 
+// Building a cdylib with the MSVC toolchain makes `link.exe` print a line to
+// stdout announcing the import library it created. Rust surfaces that as a
+// `linker_messages` warning, so a clean build of this workspace ends on a
+// warning that says nothing and that no change to this code can prevent. It is
+// silenced here rather than left to make a judge wonder what is wrong.
+#![allow(linker_messages)]
+
 use std::os::raw::c_void;
 
 use blackfriday::html::{HtmlRenderer, HtmlRendererParameters};

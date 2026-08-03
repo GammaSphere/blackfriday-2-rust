@@ -13,9 +13,12 @@ EXE ?= $(if $(filter Windows_NT,$(OS)),.exe,)
 .DEFAULT_GOAL := build
 .PHONY: build test fmt lint verify-hashes check clean
 
-## build: compile the release library
+## build: compile everything, including the `bf` CLI and the parity harness
+##
+## This is the one command. It produces target/release/bf (the runnable
+## artifact) and target/release/bf-serve (which `make parity` needs).
 build:
-	$(CARGO) build --release
+	$(CARGO) build --release --workspace
 
 ## test: run the port's own test suite
 test:

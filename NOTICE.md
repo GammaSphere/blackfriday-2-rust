@@ -16,7 +16,7 @@ hashes.
 
 The upstream license text is reproduced in `LICENSE-blackfriday.txt`.
 
-Port code under `src/`, `ffi/`, `harness/`, `adapter/`, `examples/`, `tools/`,
+Port code under `src/`, `ffi/`, `harness/`, `adapter/`, `tools/`,
 `fuzz/`, `bench/`, and the port's own tests in `tests/*.rs` is original work
 written for this port. Only `tests/original/` is upstream's.
 

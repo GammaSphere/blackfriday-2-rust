@@ -1,5 +1,9 @@
 [workspace]
 members = [".", "ffi", "harness", "bench/rust"]
+# So that `cargo build --release` at the root really does build everything the
+# README says it does -- the `bf` CLI, the `bf-serve` parity harness, the
+# benchmark binary and the C ABI -- rather than only the root package.
+default-members = [".", "ffi", "harness", "bench/rust"]
 
 [package]
 name = "blackfriday"
