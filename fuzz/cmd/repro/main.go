@@ -26,10 +26,20 @@ func main() {
 	literal := flag.String("input", "", "input as a Go-quoted string; stdin if empty")
 	show := flag.Bool("show", false, "print the rendered output instead of a summary")
 	toc := flag.Bool("toc", false, "enable the TOC renderer flag and AutoHeadingIDs")
+	file := flag.String("file", "", "read the input from this path instead of stdin")
 	flag.Parse()
 
 	var input []byte
-	if *literal != "" {
+	if *file != "" {
+		// A path rather than stdin, so the same demo runs in PowerShell,
+		// which reserves '<' and re-encodes anything piped through it.
+		b, err := os.ReadFile(*file)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		input = b
+	} else if *literal != "" {
 		unquoted, err := unquote(*literal)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)

@@ -188,6 +188,13 @@ The **original, unmodified** Go suite against the Rust port:
 make parity
 ```
 
+On Windows, where `make` is usually absent, the same three steps — verify the
+kickoff hashes, build the Rust helper, run `go test` — are a script:
+
+```powershell
+.\scripts\parity.ps1
+```
+
 Differential fuzzing, both implementations supervised as child processes so a
 hang is a finding rather than the end of the run:
 
@@ -233,7 +240,7 @@ checkout unmodified on every platform.
 - [BENCHMARKS.md](BENCHMARKS.md) — measurements, method, and what is slower
 - [DECISIONS.md](DECISIONS.md) — every place Rust and blackfriday disagreed
 - [docs/PORT-STATUS.md](docs/PORT-STATUS.md) — working notes
-- [docs/VIDEO-PLAN.md](docs/VIDEO-PLAN.md) — the demo shot list, with verified commands
+- [docs/VIDEO-SCRIPT.md](docs/VIDEO-SCRIPT.md) — the demo script: narration, commands, and what to show
 
 ## License
 
